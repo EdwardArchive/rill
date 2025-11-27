@@ -44,6 +44,7 @@
     details?: string,
   ) => void = () => {};
   export let currentOlapConnector: string = "";
+  export let onOlapConfirmationSubmittingChange: (value: boolean) => void = () => {};
 
   export { paramsForm, dsnForm };
   export { handleSaveAnyway };
@@ -51,12 +52,13 @@
   // OLAP connector change confirmation state
   let showOlapChangeConfirm = false;
   let pendingSubmitValues: Record<string, unknown> | null = null;
+  let isOlapConfirmationSubmitting = false;
 
-  // Check if this is an OLAP connector and if it's different from current
+  // Check if this is an OLAP connector - always ask for confirmation
+  // Even if currentOlapConnector is empty (implicit duckdb), user should decide
   $: needsOlapChangeConfirmation =
     connector.name &&
     OLAP_ENGINES.includes(connector.name) &&
-    currentOlapConnector &&
     currentOlapConnector !== connector.name;
 
   // ClickHouse schema includes the 'managed' property for backend compatibility
@@ -104,7 +106,7 @@
 
   $: submitting =
     connectionTab === "parameters" ? $paramsSubmitting : $dsnSubmitting;
-  $: isSubmitting = submitting;
+  $: isSubmitting = submitting || isOlapConfirmationSubmitting;
   $: formId = connectionTab === "parameters" ? paramsFormId : dsnFormId;
 
   // Reset connectionTab if switching to Rill-managed
@@ -328,6 +330,8 @@
   async function handleOlapConfirmation(shouldChangeOlap: boolean) {
     if (!pendingSubmitValues) return;
     showOlapChangeConfirm = false;
+    isOlapConfirmationSubmitting = true;
+    onOlapConfirmationSubmittingChange(true);
     try {
       await submitAddConnectorForm(
         queryClient,
@@ -341,8 +345,11 @@
       const error = e?.message || "Unknown error";
       const details = e?.details !== e?.message ? e?.details : undefined;
       setError(error, details);
+    } finally {
+      isOlapConfirmationSubmitting = false;
+      onOlapConfirmationSubmittingChange(false);
+      pendingSubmitValues = null;
     }
-    pendingSubmitValues = null;
   }
 
   $: properties = (() => {

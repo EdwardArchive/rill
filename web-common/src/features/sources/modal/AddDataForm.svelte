@@ -39,12 +39,13 @@
   // OLAP connector change confirmation state
   let showOlapChangeConfirm = false;
   let pendingSubmitValues: Record<string, unknown> | null = null;
+  let isOlapConfirmationSubmitting = false;
 
-  // Check if this is an OLAP connector and if it's different from current
+  // Check if this is an OLAP connector - always ask for confirmation
+  // Even if currentOlapConnector is empty (implicit duckdb), user should decide
   $: needsOlapChangeConfirmation =
     connector.name &&
     OLAP_ENGINES.includes(connector.name) &&
-    currentOlapConnector &&
     currentOlapConnector !== connector.name;
 
   let saveAnyway = false;
@@ -145,6 +146,7 @@
   let clickhouseParamsForm;
   let clickhouseDsnForm;
   let clickhouseShowSaveAnyway: boolean = false;
+  let clickhouseOlapConfirmationSubmitting: boolean = false;
 
   $: isSubmitDisabled = (() => {
     if (onlyDsn || connectionTab === "dsn") {
@@ -193,7 +195,7 @@
     }
   })();
 
-  $: isSubmitting = submitting;
+  $: isSubmitting = submitting || isOlapConfirmationSubmitting;
 
   // Reset errors when form is modified
   $: (() => {
@@ -313,22 +315,27 @@
   async function handleOlapConfirmation(shouldChangeOlap: boolean) {
     if (!pendingSubmitValues) return;
     showOlapChangeConfirm = false;
-    await formManager.submitConnectorAfterConfirmation({
-      queryClient,
-      values: pendingSubmitValues,
-      changeOlapConnector: shouldChangeOlap,
-      onClose,
-      setError: (message, details) => {
-        if (onlyDsn || connectionTab === "dsn") {
-          dsnError = message;
-          dsnErrorDetails = details;
-        } else {
-          paramsError = message;
-          paramsErrorDetails = details;
-        }
-      },
-    });
-    pendingSubmitValues = null;
+    isOlapConfirmationSubmitting = true;
+    try {
+      await formManager.submitConnectorAfterConfirmation({
+        queryClient,
+        values: pendingSubmitValues,
+        changeOlapConnector: shouldChangeOlap,
+        onClose,
+        setError: (message, details) => {
+          if (onlyDsn || connectionTab === "dsn") {
+            dsnError = message;
+            dsnErrorDetails = details;
+          } else {
+            paramsError = message;
+            paramsErrorDetails = details;
+          }
+        },
+      });
+    } finally {
+      isOlapConfirmationSubmitting = false;
+      pendingSubmitValues = null;
+    }
   }
 
   async function handleFileUpload(file: File): Promise<string> {
@@ -359,6 +366,9 @@
           setError={(error, details) => {
             clickhouseError = error;
             clickhouseErrorDetails = details;
+          }}
+          onOlapConfirmationSubmittingChange={(value) => {
+            clickhouseOlapConfirmationSubmitting = value;
           }}
           bind:formId={clickhouseFormId}
           bind:isSubmitting={clickhouseSubmitting}
@@ -499,14 +509,18 @@
 
         <Button
           disabled={connector.name === "clickhouse"
-            ? clickhouseSubmitting || clickhouseIsSubmitDisabled
-            : submitting || isSubmitDisabled}
+            ? clickhouseSubmitting || clickhouseIsSubmitDisabled || clickhouseOlapConfirmationSubmitting
+            : submitting || isSubmitDisabled || isOlapConfirmationSubmitting}
           loading={connector.name === "clickhouse"
-            ? clickhouseSubmitting
-            : submitting}
+            ? clickhouseSubmitting || clickhouseOlapConfirmationSubmitting
+            : submitting || isOlapConfirmationSubmitting}
           loadingCopy={connector.name === "clickhouse"
-            ? "Connecting..."
-            : "Testing connection..."}
+            ? clickhouseOlapConfirmationSubmitting
+              ? "Saving..."
+              : "Connecting..."
+            : isOlapConfirmationSubmitting
+              ? "Saving..."
+              : "Testing connection..."}
           form={connector.name === "clickhouse" ? clickhouseFormId : formId}
           submitForm
           type="primary"

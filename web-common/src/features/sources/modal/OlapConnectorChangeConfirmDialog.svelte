@@ -41,7 +41,10 @@
 
         <p class="text-slate-500 text-xs mt-3">
           Current default:
-          <code class="bg-slate-100 px-1 rounded">{currentConnector}</code>
+          <code class="bg-slate-100 px-1 rounded">{currentConnector || "duckdb"}</code>
+          {#if !currentConnector}
+            <span class="text-slate-400">(implicit)</span>
+          {/if}
         </p>
       </Alert.Description>
     </Alert.Header>
