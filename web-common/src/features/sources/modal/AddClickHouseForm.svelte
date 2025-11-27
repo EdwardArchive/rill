@@ -24,10 +24,12 @@
   import {
     CONNECTOR_TYPE_OPTIONS,
     CONNECTION_TAB_OPTIONS,
+    OLAP_ENGINES,
     type ClickHouseConnectorType,
   } from "./constants";
   import ConnectorTypeSelector from "@rilldata/web-common/components/forms/ConnectorTypeSelector.svelte";
   import { getInitialFormValuesFromProperties } from "../sourceUtils";
+  import OlapConnectorChangeConfirmDialog from "./OlapConnectorChangeConfirmDialog.svelte";
 
   export let connector: V1ConnectorDriver;
   export let formId: string;
@@ -41,9 +43,22 @@
     error: string | null,
     details?: string,
   ) => void = () => {};
+  export let currentOlapConnector: string = "";
 
   export { paramsForm, dsnForm };
   export { handleSaveAnyway };
+
+  // OLAP connector change confirmation state
+  let showOlapChangeConfirm = false;
+  let changeOlapConnector = true;
+  let pendingSubmitValues: Record<string, unknown> | null = null;
+
+  // Check if this is an OLAP connector and if it's different from current
+  $: isOlapConnector = connector.name ? OLAP_ENGINES.includes(connector.name) : false;
+  $: needsOlapChangeConfirmation = isOlapConnector &&
+    currentOlapConnector &&
+    connector.name &&
+    currentOlapConnector !== connector.name;
 
   // ClickHouse schema includes the 'managed' property for backend compatibility
   const clickhouseSchema = yup(getYupSchema["clickhouse"]);
@@ -248,6 +263,23 @@
     }
 
     try {
+      // Check if OLAP confirmation is needed
+      if (needsOlapChangeConfirmation) {
+        // Test connection first (dry run)
+        await submitAddConnectorForm(
+          queryClient,
+          connector,
+          values,
+          false, // not saveAnyway
+          false, // don't change OLAP connector yet
+          true,  // dryRun = true
+        );
+        // If test succeeds, show confirmation dialog
+        pendingSubmitValues = values;
+        showOlapChangeConfirm = true;
+        return;
+      }
+
       await submitAddConnectorForm(
         queryClient,
         connector,
@@ -291,6 +323,49 @@
         setError(dsnError, dsnErrorDetails);
       }
     }
+  }
+
+  // OLAP confirmation handlers
+  async function confirmOlapConnectorChange() {
+    if (!pendingSubmitValues) return;
+    changeOlapConnector = true;
+    showOlapChangeConfirm = false;
+    try {
+      await submitAddConnectorForm(
+        queryClient,
+        connector,
+        pendingSubmitValues,
+        false, // not saveAnyway
+        true,  // changeOlapConnector = true
+      );
+      onClose();
+    } catch (e) {
+      const error = e?.message || "Unknown error";
+      const details = e?.details !== e?.message ? e?.details : undefined;
+      setError(error, details);
+    }
+    pendingSubmitValues = null;
+  }
+
+  async function cancelOlapConnectorChange() {
+    if (!pendingSubmitValues) return;
+    changeOlapConnector = false;
+    showOlapChangeConfirm = false;
+    try {
+      await submitAddConnectorForm(
+        queryClient,
+        connector,
+        pendingSubmitValues,
+        false, // not saveAnyway
+        false, // changeOlapConnector = false
+      );
+      onClose();
+    } catch (e) {
+      const error = e?.message || "Unknown error";
+      const details = e?.details !== e?.message ? e?.details : undefined;
+      setError(error, details);
+    }
+    pendingSubmitValues = null;
   }
 
   $: properties = (() => {
@@ -500,3 +575,12 @@
     </form>
   {/if}
 </div>
+
+<!-- OLAP Connector Change Confirmation Dialog -->
+<OlapConnectorChangeConfirmDialog
+  bind:open={showOlapChangeConfirm}
+  currentConnector={currentOlapConnector}
+  newConnector={connector.name ?? ""}
+  onConfirm={confirmOlapConnectorChange}
+  onCancel={cancelOlapConnectorChange}
+/>

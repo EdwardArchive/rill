@@ -26,12 +26,27 @@
   import { AddDataFormManager } from "./AddDataFormManager";
   import { hasOnlyDsn } from "./utils";
   import AddDataFormSection from "./AddDataFormSection.svelte";
+  import OlapConnectorChangeConfirmDialog from "./OlapConnectorChangeConfirmDialog.svelte";
+  import { OLAP_ENGINES } from "./constants";
 
   export let connector: V1ConnectorDriver;
   export let formType: AddDataFormType;
   export let isSubmitting: boolean;
   export let onBack: () => void;
   export let onClose: () => void;
+  export let currentOlapConnector: string = "";
+
+  // OLAP connector change confirmation state
+  let showOlapChangeConfirm = false;
+  let changeOlapConnector = true;
+  let pendingSubmitValues: Record<string, unknown> | null = null;
+
+  // Check if this is an OLAP connector and if it's different from current
+  $: isOlapConnector = connector.name ? OLAP_ENGINES.includes(connector.name) : false;
+  $: needsOlapChangeConfirmation = isOlapConnector &&
+    currentOlapConnector &&
+    connector.name &&
+    currentOlapConnector !== connector.name;
 
   let saveAnyway = false;
   let showSaveAnyway = false;
@@ -54,6 +69,7 @@
     formType,
     onParamsUpdate: (e: any) => handleOnUpdate(e),
     onDsnUpdate: (e: any) => handleOnUpdate(e),
+    changeOlapConnector,
   });
 
   const isMultiStepConnector = formManager.isMultiStepConnector;
@@ -272,7 +288,7 @@
     ? clickhouseSubmitting && saveAnyway
     : submitting && saveAnyway;
 
-  handleOnUpdate = formManager.makeOnUpdate({
+  $: handleOnUpdate = formManager.makeOnUpdate({
     onClose,
     queryClient,
     getConnectionTab: () => connectionTab,
@@ -287,7 +303,57 @@
     setShowSaveAnyway: (value: boolean) => {
       showSaveAnyway = value;
     },
+    needsOlapConfirmation: () => !!needsOlapChangeConfirmation,
+    onOlapConfirmationNeeded: (values: Record<string, unknown>) => {
+      pendingSubmitValues = values;
+      showOlapChangeConfirm = true;
+    },
   });
+
+  // OLAP confirmation handlers
+  async function confirmOlapConnectorChange() {
+    if (!pendingSubmitValues) return;
+    changeOlapConnector = true;
+    showOlapChangeConfirm = false;
+    await formManager.submitConnectorAfterConfirmation({
+      queryClient,
+      values: pendingSubmitValues,
+      changeOlapConnector: true,
+      onClose,
+      setError: (message, details) => {
+        if (onlyDsn || connectionTab === "dsn") {
+          dsnError = message;
+          dsnErrorDetails = details;
+        } else {
+          paramsError = message;
+          paramsErrorDetails = details;
+        }
+      },
+    });
+    pendingSubmitValues = null;
+  }
+
+  async function cancelOlapConnectorChange() {
+    if (!pendingSubmitValues) return;
+    changeOlapConnector = false;
+    showOlapChangeConfirm = false;
+    await formManager.submitConnectorAfterConfirmation({
+      queryClient,
+      values: pendingSubmitValues,
+      changeOlapConnector: false,
+      onClose,
+      setError: (message, details) => {
+        if (onlyDsn || connectionTab === "dsn") {
+          dsnError = message;
+          dsnErrorDetails = details;
+        } else {
+          paramsError = message;
+          paramsErrorDetails = details;
+        }
+      },
+    });
+    pendingSubmitValues = null;
+  }
 
   async function handleFileUpload(file: File): Promise<string> {
     return formManager.handleFileUpload(file);
@@ -313,6 +379,7 @@
         <AddClickHouseForm
           {connector}
           {onClose}
+          {currentOlapConnector}
           setError={(error, details) => {
             clickhouseError = error;
             clickhouseErrorDetails = details;
@@ -511,3 +578,12 @@
     <NeedHelpText {connector} />
   </div>
 </div>
+
+<!-- OLAP Connector Change Confirmation Dialog -->
+<OlapConnectorChangeConfirmDialog
+  bind:open={showOlapChangeConfirm}
+  currentConnector={currentOlapConnector}
+  newConnector={connector.name ?? ""}
+  onConfirm={confirmOlapConnectorChange}
+  onCancel={cancelOlapConnectorChange}
+/>
