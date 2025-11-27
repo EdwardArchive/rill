@@ -50,14 +50,13 @@
 
   // OLAP connector change confirmation state
   let showOlapChangeConfirm = false;
-  let changeOlapConnector = true;
   let pendingSubmitValues: Record<string, unknown> | null = null;
 
   // Check if this is an OLAP connector and if it's different from current
-  $: isOlapConnector = connector.name ? OLAP_ENGINES.includes(connector.name) : false;
-  $: needsOlapChangeConfirmation = isOlapConnector &&
-    currentOlapConnector &&
+  $: needsOlapChangeConfirmation =
     connector.name &&
+    OLAP_ENGINES.includes(connector.name) &&
+    currentOlapConnector &&
     currentOlapConnector !== connector.name;
 
   // ClickHouse schema includes the 'managed' property for backend compatibility
@@ -325,39 +324,17 @@
     }
   }
 
-  // OLAP confirmation handlers
-  async function confirmOlapConnectorChange() {
+  // OLAP confirmation handler - unified for both confirm and cancel
+  async function handleOlapConfirmation(shouldChangeOlap: boolean) {
     if (!pendingSubmitValues) return;
-    changeOlapConnector = true;
     showOlapChangeConfirm = false;
     try {
       await submitAddConnectorForm(
         queryClient,
         connector,
         pendingSubmitValues,
-        false, // not saveAnyway
-        true,  // changeOlapConnector = true
-      );
-      onClose();
-    } catch (e) {
-      const error = e?.message || "Unknown error";
-      const details = e?.details !== e?.message ? e?.details : undefined;
-      setError(error, details);
-    }
-    pendingSubmitValues = null;
-  }
-
-  async function cancelOlapConnectorChange() {
-    if (!pendingSubmitValues) return;
-    changeOlapConnector = false;
-    showOlapChangeConfirm = false;
-    try {
-      await submitAddConnectorForm(
-        queryClient,
-        connector,
-        pendingSubmitValues,
-        false, // not saveAnyway
-        false, // changeOlapConnector = false
+        false,
+        shouldChangeOlap,
       );
       onClose();
     } catch (e) {
@@ -581,6 +558,6 @@
   bind:open={showOlapChangeConfirm}
   currentConnector={currentOlapConnector}
   newConnector={connector.name ?? ""}
-  onConfirm={confirmOlapConnectorChange}
-  onCancel={cancelOlapConnectorChange}
+  onConfirm={() => handleOlapConfirmation(true)}
+  onCancel={() => handleOlapConfirmation(false)}
 />
