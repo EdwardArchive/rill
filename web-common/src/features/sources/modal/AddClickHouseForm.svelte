@@ -29,7 +29,6 @@
   } from "./constants";
   import ConnectorTypeSelector from "@rilldata/web-common/components/forms/ConnectorTypeSelector.svelte";
   import { getInitialFormValuesFromProperties } from "../sourceUtils";
-  import OlapConnectorChangeConfirmDialog from "./OlapConnectorChangeConfirmDialog.svelte";
 
   export let connector: V1ConnectorDriver;
   export let formId: string;
@@ -44,15 +43,10 @@
     details?: string,
   ) => void = () => {};
   export let currentOlapConnector: string = "";
-  export let onOlapConfirmationSubmittingChange: (value: boolean) => void = () => {};
+  export let onOlapConfirmationNeeded: (values: Record<string, unknown>) => void = () => {};
 
   export { paramsForm, dsnForm };
   export { handleSaveAnyway };
-
-  // OLAP connector change confirmation state
-  let showOlapChangeConfirm = false;
-  let pendingSubmitValues: Record<string, unknown> | null = null;
-  let isOlapConfirmationSubmitting = false;
 
   // Check if this is an OLAP connector - always ask for confirmation
   // Even if currentOlapConnector is empty (implicit duckdb), user should decide
@@ -106,7 +100,7 @@
 
   $: submitting =
     connectionTab === "parameters" ? $paramsSubmitting : $dsnSubmitting;
-  $: isSubmitting = submitting || isOlapConfirmationSubmitting;
+  $: isSubmitting = submitting;
   $: formId = connectionTab === "parameters" ? paramsFormId : dsnFormId;
 
   // Reset connectionTab if switching to Rill-managed
@@ -275,9 +269,8 @@
           false, // don't change OLAP connector yet
           true,  // dryRun = true
         );
-        // If test succeeds, show confirmation dialog
-        pendingSubmitValues = values;
-        showOlapChangeConfirm = true;
+        // If test succeeds, notify parent to show confirmation dialog with values
+        onOlapConfirmationNeeded(values);
         return;
       }
 
@@ -326,31 +319,6 @@
     }
   }
 
-  // OLAP confirmation handler - unified for both confirm and cancel
-  async function handleOlapConfirmation(shouldChangeOlap: boolean) {
-    if (!pendingSubmitValues) return;
-    showOlapChangeConfirm = false;
-    isOlapConfirmationSubmitting = true;
-    onOlapConfirmationSubmittingChange(true);
-    try {
-      await submitAddConnectorForm(
-        queryClient,
-        connector,
-        pendingSubmitValues,
-        false,
-        shouldChangeOlap,
-      );
-      onClose();
-    } catch (e) {
-      const error = e?.message || "Unknown error";
-      const details = e?.details !== e?.message ? e?.details : undefined;
-      setError(error, details);
-    } finally {
-      isOlapConfirmationSubmitting = false;
-      onOlapConfirmationSubmittingChange(false);
-      pendingSubmitValues = null;
-    }
-  }
 
   $: properties = (() => {
     if (connectorType === "rill-managed") {
@@ -559,12 +527,3 @@
     </form>
   {/if}
 </div>
-
-<!-- OLAP Connector Change Confirmation Dialog -->
-<OlapConnectorChangeConfirmDialog
-  bind:open={showOlapChangeConfirm}
-  currentConnector={currentOlapConnector}
-  newConnector={connector.name ?? ""}
-  onConfirm={() => handleOlapConfirmation(true)}
-  onCancel={() => handleOlapConfirmation(false)}
-/>
