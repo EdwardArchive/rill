@@ -569,11 +569,13 @@
   </div>
 </div>
 
-<!-- OLAP Connector Change Confirmation Dialog -->
-<OlapConnectorChangeConfirmDialog
-  bind:open={showOlapChangeConfirm}
-  currentConnector={currentOlapConnector}
-  newConnector={connector.name ?? ""}
-  onConfirm={() => handleOlapConfirmation(true)}
-  onCancel={() => handleOlapConfirmation(false)}
-/>
+<!-- OLAP Connector Change Confirmation Dialog (for non-ClickHouse connectors) -->
+{#if connector.name !== "clickhouse"}
+  <OlapConnectorChangeConfirmDialog
+    bind:open={showOlapChangeConfirm}
+    currentConnector={currentOlapConnector}
+    newConnector={connector.name ?? ""}
+    onConfirm={() => handleOlapConfirmation(true)}
+    onCancel={() => handleOlapConfirmation(false)}
+  />
+{/if}
