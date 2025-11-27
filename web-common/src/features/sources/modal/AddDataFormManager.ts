@@ -63,6 +63,7 @@ export class AddDataFormManager {
   dsn: ReturnType<typeof superForm>;
   private connector: V1ConnectorDriver;
   private formType: AddDataFormType;
+  private changeOlapConnector: boolean;
 
   // Centralized error normalization for this manager
   private normalizeError(e: unknown): { message: string; details?: string } {
@@ -74,10 +75,12 @@ export class AddDataFormManager {
     formType: AddDataFormType;
     onParamsUpdate: (event: SuperFormUpdateEvent) => void;
     onDsnUpdate: (event: SuperFormUpdateEvent) => void;
+    changeOlapConnector?: boolean;
   }) {
-    const { connector, formType, onParamsUpdate, onDsnUpdate } = args;
+    const { connector, formType, onParamsUpdate, onDsnUpdate, changeOlapConnector = true } = args;
     this.connector = connector;
     this.formType = formType;
+    this.changeOlapConnector = changeOlapConnector;
 
     // Layout height
     this.formHeight = TALL_FORM_CONNECTORS.has(connector.name ?? "")
@@ -240,6 +243,8 @@ export class AddDataFormManager {
     setParamsError: (message: string | null, details?: string) => void;
     setDsnError: (message: string | null, details?: string) => void;
     setShowSaveAnyway?: (value: boolean) => void;
+    needsOlapConfirmation?: boolean | (() => boolean);
+    onOlapConfirmationNeeded?: (values: Record<string, unknown>) => void;
   }) {
     const {
       onClose,
@@ -248,7 +253,15 @@ export class AddDataFormManager {
       setParamsError,
       setDsnError,
       setShowSaveAnyway,
+      needsOlapConfirmation = false,
+      onOlapConfirmationNeeded,
     } = args;
+
+    // Support both boolean and function for reactive checking
+    const checkNeedsOlapConfirmation = () =>
+      typeof needsOlapConfirmation === 'function'
+        ? needsOlapConfirmation()
+        : needsOlapConfirmation;
     const connector = this.connector;
     const isMultiStepConnector = MULTI_STEP_CONNECTORS.includes(
       connector.name ?? "",
@@ -283,7 +296,7 @@ export class AddDataFormManager {
           await submitAddSourceForm(queryClient, connector, values);
           onClose();
         } else if (isMultiStepConnector && stepState.step === "connector") {
-          await submitAddConnectorForm(queryClient, connector, values, false);
+          await submitAddConnectorForm(queryClient, connector, values, false, this.changeOlapConnector);
           setConnectorConfig(values);
           setStep("source");
           return;
@@ -291,7 +304,15 @@ export class AddDataFormManager {
           await submitAddSourceForm(queryClient, connector, values);
           onClose();
         } else {
-          await submitAddConnectorForm(queryClient, connector, values, false);
+          // For OLAP connectors that need confirmation, show dialog first
+          if (checkNeedsOlapConfirmation() && onOlapConfirmationNeeded) {
+            // Test connection first (dry run)
+            await submitAddConnectorForm(queryClient, connector, values, false, false, true);
+            // If test succeeds, show confirmation dialog
+            onOlapConfirmationNeeded(values);
+            return;
+          }
+          await submitAddConnectorForm(queryClient, connector, values, false, this.changeOlapConnector);
           onClose();
         }
       } catch (e) {
@@ -306,6 +327,24 @@ export class AddDataFormManager {
         // no-op: saveAnyway handled in Svelte
       }
     };
+  }
+
+  // Method to complete connector submission after OLAP confirmation
+  async submitConnectorAfterConfirmation(args: {
+    queryClient: any;
+    values: Record<string, unknown>;
+    changeOlapConnector: boolean;
+    onClose: () => void;
+    setError: (message: string | null, details?: string) => void;
+  }): Promise<void> {
+    const { queryClient, values, changeOlapConnector, onClose, setError } = args;
+    try {
+      await submitAddConnectorForm(queryClient, this.connector, values, false, changeOlapConnector);
+      onClose();
+    } catch (e) {
+      const { message, details } = this.normalizeError(e);
+      setError(message, details);
+    }
   }
 
   onStringInputChange = (
@@ -503,6 +542,7 @@ export class AddDataFormManager {
         this.connector,
         processedValues,
         true,
+        this.changeOlapConnector,
       );
       return { ok: true } as const;
     } catch (e) {

@@ -26,12 +26,28 @@
   import { AddDataFormManager } from "./AddDataFormManager";
   import { hasOnlyDsn } from "./utils";
   import AddDataFormSection from "./AddDataFormSection.svelte";
+  import OlapConnectorChangeConfirmDialog from "./OlapConnectorChangeConfirmDialog.svelte";
+  import { OLAP_ENGINES } from "./constants";
+  import { submitAddConnectorForm } from "./submitAddDataForm";
 
   export let connector: V1ConnectorDriver;
   export let formType: AddDataFormType;
   export let isSubmitting: boolean;
   export let onBack: () => void;
   export let onClose: () => void;
+  export let currentOlapConnector: string = "";
+
+  // OLAP connector change confirmation state
+  let showOlapChangeConfirm = false;
+  let pendingSubmitValues: Record<string, unknown> | null = null;
+  let isOlapConfirmationSubmitting = false;
+
+  // Check if this is an OLAP connector - always ask for confirmation
+  // Even if currentOlapConnector is empty (implicit duckdb), user should decide
+  $: needsOlapChangeConfirmation =
+    connector.name &&
+    OLAP_ENGINES.includes(connector.name) &&
+    currentOlapConnector !== connector.name;
 
   let saveAnyway = false;
   let showSaveAnyway = false;
@@ -54,6 +70,7 @@
     formType,
     onParamsUpdate: (e: any) => handleOnUpdate(e),
     onDsnUpdate: (e: any) => handleOnUpdate(e),
+    changeOlapConnector: false, // Default: Do not change OLAP connector (confirmation dialog handles explicit choice)
   });
 
   const isMultiStepConnector = formManager.isMultiStepConnector;
@@ -130,6 +147,8 @@
   let clickhouseParamsForm;
   let clickhouseDsnForm;
   let clickhouseShowSaveAnyway: boolean = false;
+  let clickhouseOlapConfirmationSubmitting: boolean = false;
+
 
   $: isSubmitDisabled = (() => {
     if (onlyDsn || connectionTab === "dsn") {
@@ -178,7 +197,7 @@
     }
   })();
 
-  $: isSubmitting = submitting;
+  $: isSubmitting = submitting || isOlapConfirmationSubmitting;
 
   // Reset errors when form is modified
   $: (() => {
@@ -272,7 +291,7 @@
     ? clickhouseSubmitting && saveAnyway
     : submitting && saveAnyway;
 
-  handleOnUpdate = formManager.makeOnUpdate({
+  $: handleOnUpdate = formManager.makeOnUpdate({
     onClose,
     queryClient,
     getConnectionTab: () => connectionTab,
@@ -287,7 +306,66 @@
     setShowSaveAnyway: (value: boolean) => {
       showSaveAnyway = value;
     },
+    needsOlapConfirmation: () => !!needsOlapChangeConfirmation,
+    onOlapConfirmationNeeded: (values: Record<string, unknown>) => {
+      pendingSubmitValues = values;
+      showOlapChangeConfirm = true;
+    },
   });
+
+  // OLAP confirmation handler - unified for all OLAP connectors (ClickHouse and others)
+  async function handleOlapConfirmation(shouldChangeOlap: boolean) {
+    if (!pendingSubmitValues) return;
+    showOlapChangeConfirm = false;
+
+    const isClickhouse = connector.name === "clickhouse";
+
+    if (isClickhouse) {
+      // ClickHouse: use direct submission with its own loading state
+      clickhouseOlapConfirmationSubmitting = true;
+      try {
+        await submitAddConnectorForm(
+          queryClient,
+          connector,
+          pendingSubmitValues,
+          false,
+          shouldChangeOlap,
+        );
+        onClose();
+      } catch (e: any) {
+        const error = e?.message || "Unknown error";
+        const details = e?.details !== e?.message ? e?.details : undefined;
+        clickhouseError = error;
+        clickhouseErrorDetails = details;
+      } finally {
+        clickhouseOlapConfirmationSubmitting = false;
+        pendingSubmitValues = null;
+      }
+    } else {
+      // Non-ClickHouse: use formManager
+      isOlapConfirmationSubmitting = true;
+      try {
+        await formManager.submitConnectorAfterConfirmation({
+          queryClient,
+          values: pendingSubmitValues,
+          changeOlapConnector: shouldChangeOlap,
+          onClose,
+          setError: (message, details) => {
+            if (onlyDsn || connectionTab === "dsn") {
+              dsnError = message;
+              dsnErrorDetails = details;
+            } else {
+              paramsError = message;
+              paramsErrorDetails = details;
+            }
+          },
+        });
+      } finally {
+        isOlapConfirmationSubmitting = false;
+        pendingSubmitValues = null;
+      }
+    }
+  }
 
   async function handleFileUpload(file: File): Promise<string> {
     return formManager.handleFileUpload(file);
@@ -313,9 +391,14 @@
         <AddClickHouseForm
           {connector}
           {onClose}
+          {currentOlapConnector}
           setError={(error, details) => {
             clickhouseError = error;
             clickhouseErrorDetails = details;
+          }}
+          onOlapConfirmationNeeded={(values) => {
+            pendingSubmitValues = values;
+            showOlapChangeConfirm = true;
           }}
           bind:formId={clickhouseFormId}
           bind:isSubmitting={clickhouseSubmitting}
@@ -456,14 +539,18 @@
 
         <Button
           disabled={connector.name === "clickhouse"
-            ? clickhouseSubmitting || clickhouseIsSubmitDisabled
-            : submitting || isSubmitDisabled}
+            ? clickhouseSubmitting || clickhouseIsSubmitDisabled || clickhouseOlapConfirmationSubmitting
+            : submitting || isSubmitDisabled || isOlapConfirmationSubmitting}
           loading={connector.name === "clickhouse"
-            ? clickhouseSubmitting
-            : submitting}
+            ? clickhouseSubmitting || clickhouseOlapConfirmationSubmitting
+            : submitting || isOlapConfirmationSubmitting}
           loadingCopy={connector.name === "clickhouse"
-            ? "Connecting..."
-            : "Testing connection..."}
+            ? clickhouseOlapConfirmationSubmitting
+              ? "Saving..."
+              : "Connecting..."
+            : isOlapConfirmationSubmitting
+              ? "Saving..."
+              : "Testing connection..."}
           form={connector.name === "clickhouse" ? clickhouseFormId : formId}
           submitForm
           type="primary"
@@ -511,3 +598,12 @@
     <NeedHelpText {connector} />
   </div>
 </div>
+
+<!-- OLAP Connector Change Confirmation Dialog (unified for all OLAP connectors) -->
+<OlapConnectorChangeConfirmDialog
+  bind:open={showOlapChangeConfirm}
+  currentConnector={currentOlapConnector}
+  newConnector={connector.name ?? ""}
+  onConfirm={() => handleOlapConfirmation(true)}
+  onCancel={() => handleOlapConfirmation(false)}
+/>

@@ -4,6 +4,7 @@
   import { cn } from "@rilldata/web-common/lib/shadcn";
   import {
     createRuntimeServiceListConnectorDrivers,
+    createRuntimeServiceGetInstance,
     type V1ConnectorDriver,
   } from "@rilldata/web-common/runtime-client";
   import { onMount } from "svelte";
@@ -24,11 +25,16 @@
   import { OLAP_ENGINES, ALL_CONNECTORS, SOURCES } from "./constants";
   import { ICONS } from "./icons";
   import { resetConnectorStep } from "./connectorStepStore";
-
   let step = 0;
   let selectedConnector: null | V1ConnectorDriver = null;
   let requestConnector = false;
   let isSubmittingForm = false;
+
+  // Get current instance to check existing OLAP connector
+  $: instanceQuery = createRuntimeServiceGetInstance($runtime.instanceId, {
+    sensitive: true,
+  });
+  $: currentOlapConnector = $instanceQuery.data?.instance?.olapConnector ?? "";
 
   const connectorsQuery = createRuntimeServiceListConnectorDrivers({
     query: {
@@ -237,6 +243,7 @@
             onClose={resetModal}
             onBack={back}
             bind:isSubmitting={isSubmittingForm}
+            {currentOlapConnector}
           />
         {/if}
       {/if}
