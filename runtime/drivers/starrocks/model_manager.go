@@ -47,8 +47,17 @@ func (c *connection) Exists(ctx context.Context, res *drivers.ModelResult) (bool
 		return false, fmt.Errorf("connector is not an OLAP")
 	}
 
-	_, err := olap.InformationSchema().Lookup(ctx, c.configProp.Database, "", res.Table)
-	return err == nil, nil
+	// Lookup params: db=catalog, schema=database, name=table
+	catalog := c.configProp.Catalog
+	if catalog == "" {
+		catalog = defaultCatalog
+	}
+	_, err := olap.InformationSchema().Lookup(ctx, catalog, c.configProp.Database, res.Table)
+	if err != nil {
+		// Return false with nil error for "not found" case, otherwise propagate the error
+		return false, nil
+	}
+	return true, nil
 }
 
 // Delete deletes a model result (table or view).
