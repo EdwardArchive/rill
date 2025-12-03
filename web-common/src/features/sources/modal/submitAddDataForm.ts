@@ -242,6 +242,7 @@ async function saveConnectorAnyway(
   formValues: AddDataFormValues,
   newConnectorName: string,
   instanceId?: string,
+  changeOlapConnector: boolean = true,
 ): Promise<void> {
   const resolvedInstanceId = instanceId ?? get(runtime).instanceId;
 
@@ -280,7 +281,7 @@ async function saveConnectorAnyway(
     createOnly: false,
   });
 
-  if (OLAP_ENGINES.includes(connector.name as string)) {
+  if (changeOlapConnector && OLAP_ENGINES.includes(connector.name as string)) {
     await setOlapConnectorInRillYAML(
       queryClient,
       resolvedInstanceId,
@@ -297,6 +298,8 @@ export async function submitAddConnectorForm(
   connector: V1ConnectorDriver,
   formValues: AddDataFormValues,
   saveAnyway: boolean = false,
+  changeOlapConnector: boolean = true,
+  dryRun: boolean = false, // If true, only test connection without creating files
 ): Promise<void> {
   const instanceId = get(runtime).instanceId;
   await beforeSubmitForm(instanceId, connector);
@@ -331,6 +334,7 @@ export async function submitAddConnectorForm(
         formValues,
         newConnectorName,
         instanceId,
+        changeOlapConnector,
       );
       return;
     } else if (!existingSubmission.completed) {
@@ -372,6 +376,7 @@ export async function submitAddConnectorForm(
           formValues,
           newConnectorName,
           instanceId,
+          changeOlapConnector,
         );
         return;
       } else {
@@ -458,7 +463,15 @@ export async function submitAddConnectorForm(
         }
       }
 
-      if (OLAP_ENGINES.includes(connector.name as string)) {
+      // If dryRun, stop here after successful test (don't update rill.yaml or navigate)
+      if (dryRun) {
+        // Rollback the test files since this was just a validation
+        const originalEnvBlobForDryRun = await getOriginalEnvBlob(queryClient, instanceId);
+        await rollbackChanges(instanceId, newConnectorFilePath, originalEnvBlobForDryRun);
+        return;
+      }
+
+      if (changeOlapConnector && OLAP_ENGINES.includes(connector.name as string)) {
         await setOlapConnectorInRillYAML(
           queryClient,
           instanceId,

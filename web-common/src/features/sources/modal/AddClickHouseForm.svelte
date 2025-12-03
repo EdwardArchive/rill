@@ -24,6 +24,7 @@
   import {
     CONNECTOR_TYPE_OPTIONS,
     CONNECTION_TAB_OPTIONS,
+    OLAP_ENGINES,
     type ClickHouseConnectorType,
   } from "./constants";
   import ConnectorTypeSelector from "@rilldata/web-common/components/forms/ConnectorTypeSelector.svelte";
@@ -41,9 +42,18 @@
     error: string | null,
     details?: string,
   ) => void = () => {};
+  export let currentOlapConnector: string = "";
+  export let onOlapConfirmationNeeded: (values: Record<string, unknown>) => void = () => {};
 
   export { paramsForm, dsnForm };
   export { handleSaveAnyway };
+
+  // Check if this is an OLAP connector - always ask for confirmation
+  // Even if currentOlapConnector is empty (implicit duckdb), user should decide
+  $: needsOlapChangeConfirmation =
+    connector.name &&
+    OLAP_ENGINES.includes(connector.name) &&
+    currentOlapConnector !== connector.name;
 
   // ClickHouse schema includes the 'managed' property for backend compatibility
   const clickhouseSchema = yup(getYupSchema["clickhouse"]);
@@ -248,6 +258,22 @@
     }
 
     try {
+      // Check if OLAP confirmation is needed
+      if (needsOlapChangeConfirmation) {
+        // Test connection first (dry run)
+        await submitAddConnectorForm(
+          queryClient,
+          connector,
+          values,
+          false, // not saveAnyway
+          false, // don't change OLAP connector yet
+          true,  // dryRun = true
+        );
+        // If test succeeds, notify parent to show confirmation dialog with values
+        onOlapConfirmationNeeded(values);
+        return;
+      }
+
       await submitAddConnectorForm(
         queryClient,
         connector,
@@ -292,6 +318,7 @@
       }
     }
   }
+
 
   $: properties = (() => {
     if (connectorType === "rill-managed") {
