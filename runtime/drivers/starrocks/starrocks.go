@@ -2,6 +2,7 @@ package starrocks
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -112,6 +113,16 @@ var spec = drivers.Spec{
 			Description: "Enable logging of all SQL queries",
 			Hint:        "Useful for debugging (logs all SQL statements)",
 		},
+		{
+			Key:         "temp_database",
+			Type:        drivers.StringPropertyType,
+			DisplayName: "Temporary Database",
+			Required:    false,
+			Placeholder: "rill_temp",
+			Default:     "rill_temp",
+			Description: "Database name in default_catalog for storing temporary tables",
+			Hint:        "This database must exist in default_catalog and will be used for temporary tables during query execution",
+		},
 	},
 	ImplementsOLAP: true,
 }
@@ -138,6 +149,8 @@ type ConfigProperties struct {
 	SSL bool `mapstructure:"ssl"`
 	// LogQueries enables SQL query logging.
 	LogQueries bool `mapstructure:"log_queries"`
+	// TempDatabase is the database in default_catalog for temporary tables.
+	TempDatabase string `mapstructure:"temp_database"`
 }
 
 // Validate checks the configuration for errors.
@@ -149,8 +162,9 @@ func (c *ConfigProperties) Validate() error {
 }
 
 const (
-	defaultCatalog = "default_catalog"
-	defaultPort    = 9030
+	defaultCatalog     = "default_catalog"
+	defaultPort        = 9030
+	defaultTempDatabase = "rill_temp"
 )
 
 func (d driver) Open(instanceID string, config map[string]any, st *storage.Client, ac *activity.Client, logger *zap.Logger) (drivers.Handle, error) {
@@ -172,6 +186,9 @@ func (d driver) Open(instanceID string, config map[string]any, st *storage.Clien
 	}
 	if cfg.Port == 0 {
 		cfg.Port = defaultPort
+	}
+	if cfg.TempDatabase == "" {
+		cfg.TempDatabase = defaultTempDatabase
 	}
 
 	conn := &connection{
@@ -234,34 +251,39 @@ func (c *connection) Ping(ctx context.Context) error {
 		return err
 	}
 
-	// Validate catalog exists (only if specified and not default_catalog)
-	if c.configProp.Catalog != "" && c.configProp.Catalog != defaultCatalog {
-		var catalogCount int
-		catalogQuery := "SELECT COUNT(*) FROM information_schema.catalogs WHERE catalog_name = ?"
-		if err := db.QueryRowContext(ctx, catalogQuery, c.configProp.Catalog).Scan(&catalogCount); err != nil {
-			return fmt.Errorf("failed to validate catalog: %w", err)
-		}
-		if catalogCount == 0 {
-			return fmt.Errorf("catalog '%s' does not exist", c.configProp.Catalog)
+	// Try to validate catalog and database access by attempting a simple query
+	catalog := c.configProp.Catalog
+	if catalog == "" {
+		catalog = defaultCatalog
+	}
+
+	database := c.configProp.Database
+	if database != "" {
+		// Validate database exists by querying information_schema.schemata
+		// Use fully qualified path: <catalog>.information_schema.schemata
+		var schemaName string
+		dbQuery := fmt.Sprintf("SELECT SCHEMA_NAME FROM %s.information_schema.schemata WHERE SCHEMA_NAME = ? LIMIT 1", catalog)
+		err = db.QueryRowContext(ctx, dbQuery, database).Scan(&schemaName)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("database '%s' does not exist in catalog '%s'", database, catalog)
+		} else if err != nil {
+			return fmt.Errorf("failed to validate database: %w", err)
 		}
 	}
 
-	// Validate database exists (only if specified)
-	// Use fully qualified path: <catalog>.information_schema.schemata
-	if c.configProp.Database != "" {
-		catalog := c.configProp.Catalog
-		if catalog == "" {
-			catalog = defaultCatalog
-		}
+	// Validate temp_database exists in default_catalog
+	tempDB := c.configProp.TempDatabase
+	if tempDB == "" {
+		tempDB = defaultTempDatabase
+	}
 
-		var dbCount int
-		dbQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s.information_schema.schemata WHERE schema_name = ?", catalog)
-		if err := db.QueryRowContext(ctx, dbQuery, c.configProp.Database).Scan(&dbCount); err != nil {
-			return fmt.Errorf("failed to validate database: %w", err)
-		}
-		if dbCount == 0 {
-			return fmt.Errorf("database '%s' does not exist in catalog '%s'", c.configProp.Database, catalog)
-		}
+	var tempSchemaName string
+	tempDBQuery := fmt.Sprintf("SELECT SCHEMA_NAME FROM %s.information_schema.schemata WHERE SCHEMA_NAME = ? LIMIT 1", defaultCatalog)
+	err = db.QueryRowContext(ctx, tempDBQuery, tempDB).Scan(&tempSchemaName)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("temp_database '%s' does not exist in catalog '%s'. Please create it first: CREATE DATABASE %s.%s", tempDB, defaultCatalog, defaultCatalog, tempDB)
+	} else if err != nil {
+		return fmt.Errorf("failed to validate temp_database: %w", err)
 	}
 
 	return nil
@@ -341,15 +363,13 @@ func (c *connection) AsNotifier(properties map[string]any) (drivers.Notifier, er
 }
 
 // AsModelExecutor implements drivers.Handle.
-// StarRocks is a read-only OLAP connector, model execution is not supported.
 func (c *connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, error) {
-	return nil, drivers.ErrNotImplemented
+	return &selfToSelfExecutor{c: c}, nil
 }
 
 // AsModelManager implements drivers.Handle.
-// StarRocks is a read-only OLAP connector, model management is not supported.
 func (c *connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
-	return nil, false
+	return c, true
 }
 
 // getDB returns the database connection, creating it if necessary.
@@ -397,7 +417,6 @@ func (c *connection) buildDSN() (string, error) {
 
 	// Build DSN from individual fields
 	// Note: We don't set DBName because external catalogs (Iceberg, Hive, etc.)
-	// require SET CATALOG before accessing databases. All queries use fully
 	// qualified table names (catalog.database.table) instead.
 	cfg := mysql.NewConfig()
 	cfg.Net = "tcp"
@@ -426,7 +445,6 @@ func (c *connection) buildDSN() (string, error) {
 // StarRocks URL: starrocks://user:password@host:port/database
 // MySQL DSN: user:password@tcp(host:port)/
 // Note: Database name is stripped from DSN because external catalogs require
-// SET CATALOG before accessing databases. All queries use fully qualified names.
 func (c *connection) convertDSN(dsn string) (string, error) {
 	// Default timeout parameters
 	timeoutParams := "timeout=30s&readTimeout=300s&writeTimeout=30s&parseTime=true"

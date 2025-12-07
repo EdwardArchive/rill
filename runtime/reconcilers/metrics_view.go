@@ -8,6 +8,7 @@ import (
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime"
 	"github.com/rilldata/rill/runtime/metricsview/executor"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -88,11 +89,14 @@ func (r *MetricsViewReconciler) Reconcile(ctx context.Context, n *runtimev1.Reso
 			// StarRocks mapping: catalog -> Rill database, database -> Rill databaseSchema
 			if props := model.State.ResultProperties; props != nil {
 				propsMap := props.AsMap()
+				r.C.Logger.Debug("MetricsView model resultProperties", zap.String("model", mv.Spec.Model), zap.Any("props", propsMap))
 				if catalog, ok := propsMap["catalog"].(string); ok && catalog != "" {
 					mv.Spec.Database = catalog
+					r.C.Logger.Debug("Set MetricsView database from model catalog", zap.String("metricsView", self.Meta.Name.Name), zap.String("database", catalog))
 				}
 				if db, ok := propsMap["database"].(string); ok && db != "" {
 					mv.Spec.DatabaseSchema = db
+					r.C.Logger.Debug("Set MetricsView databaseSchema from model database", zap.String("metricsView", self.Meta.Name.Name), zap.String("databaseSchema", db))
 				}
 			}
 		} else {

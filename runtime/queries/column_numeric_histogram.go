@@ -456,6 +456,12 @@ func getMinMaxRange(ctx context.Context, olap drivers.OLAPStore, columnName, dat
 		selectColumn = fmt.Sprintf("%s::DOUBLE", sanitizedColumnName)
 	}
 
+	// StarRocks: "range" is a reserved keyword
+	rangeAlias := "range"
+	if olap.Dialect() == drivers.DialectStarRocks {
+		rangeAlias = starrocks.EscapeReservedKeyword("range")
+	}
+
 	minMaxSQL := fmt.Sprintf(
 		`
 			SELECT

@@ -21,7 +21,7 @@
   import { dsnSchema, getYupSchema } from "./yupSchemas";
   import Checkbox from "@rilldata/web-common/components/forms/Checkbox.svelte";
   import { isEmpty, normalizeErrors } from "./utils";
-  import { CONNECTION_TAB_OPTIONS } from "./constants";
+  import { CONNECTION_TAB_OPTIONS, OLAP_ENGINES } from "./constants";
   import { getInitialFormValuesFromProperties } from "../sourceUtils";
 
   export let connector: V1ConnectorDriver;
@@ -35,9 +35,18 @@
     error: string | null,
     details?: string,
   ) => void = () => {};
+  export let currentOlapConnector: string = "";
+  export let onOlapConfirmationNeeded: (values: Record<string, unknown>) => void = () => {};
 
   export { paramsForm, dsnForm };
   export { handleSaveAnyway };
+
+  // Check if this is an OLAP connector - always ask for confirmation
+  // Even if currentOlapConnector is empty (implicit duckdb), user should decide
+  $: needsOlapChangeConfirmation =
+    connector.name &&
+    OLAP_ENGINES.includes(connector.name) &&
+    currentOlapConnector !== connector.name;
 
   const starrocksSchema = yup(getYupSchema["starrocks"]);
   const initialFormValues = getInitialFormValuesFromProperties(
@@ -120,6 +129,22 @@
     setError(null, undefined);
 
     try {
+      // Check if OLAP confirmation is needed
+      if (needsOlapChangeConfirmation) {
+        // Test connection first (dry run)
+        await submitAddConnectorForm(
+          queryClient,
+          connector,
+          values,
+          false, // not saveAnyway
+          false, // don't change OLAP connector yet
+          true,  // dryRun = true
+        );
+        // If test succeeds, notify parent to show confirmation dialog with values
+        onOlapConfirmationNeeded(values);
+        return;
+      }
+
       await submitAddConnectorForm(
         queryClient,
         connector,

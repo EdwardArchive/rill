@@ -10,7 +10,6 @@ import (
 )
 
 // informationSchema implements drivers.OLAPInformationSchema for StarRocks.
-// Uses fully qualified names (catalog.information_schema.tables) instead of SET CATALOG/USE.
 type informationSchema struct {
 	c *connection
 }

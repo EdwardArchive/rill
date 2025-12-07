@@ -2,6 +2,7 @@ package starrocks
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -95,8 +96,22 @@ func (c *connection) Query(ctx context.Context, stmt *drivers.Statement) (*drive
 		return nil, err
 	}
 
+	// Get column types for proper type handling in MapScan
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		rows.Close()
+		return nil, err
+	}
+
+	// Create properly initialized row wrapper with typed scan destinations
+	starrocksRows := &starrocksRows{
+		Rows:     rows,
+		scanDest: prepareScanDest(schema),
+		colTypes: colTypes,
+	}
+
 	return &drivers.Result{
-		Rows:   &sqlRows{rows},
+		Rows:   starrocksRows,
 		Schema: schema,
 	}, nil
 }
@@ -162,8 +177,10 @@ func (c *connection) databaseTypeToRuntimeType(dbType string) *runtimev1.Type {
 	}
 
 	switch dbType {
-	case "BOOLEAN", "BOOL", "TINYINT":
+	case "BOOLEAN", "BOOL":
 		return &runtimev1.Type{Code: runtimev1.Type_CODE_BOOL}
+	case "TINYINT":
+		return &runtimev1.Type{Code: runtimev1.Type_CODE_INT8}
 	case "SMALLINT":
 		return &runtimev1.Type{Code: runtimev1.Type_CODE_INT16}
 	case "INT", "INTEGER":
@@ -199,14 +216,131 @@ func (c *connection) databaseTypeToRuntimeType(dbType string) *runtimev1.Type {
 	}
 }
 
-// sqlRows wraps sqlx.Rows to implement drivers.Rows interface.
-type sqlRows struct {
+// prepareScanDest creates a slice of typed scan destinations based on the schema.
+// This prevents the MySQL driver (used by StarRocks) from returning []byte for
+// string/decimal types when scanning into interface{}.
+func prepareScanDest(schema *runtimev1.StructType) []any {
+	scanList := make([]any, len(schema.Fields))
+	for i, field := range schema.Fields {
+		var dest any
+		switch field.Type.Code {
+		case runtimev1.Type_CODE_BOOL:
+			dest = &sql.NullBool{}
+		case runtimev1.Type_CODE_INT8:
+			// TINYINT in StarRocks is signed (-128 to 127), but Go's sql.NullByte is uint8
+			// So we scan as int16 to handle negative values
+			dest = &sql.NullInt16{}
+		case runtimev1.Type_CODE_INT16:
+			dest = &sql.NullInt16{}
+		case runtimev1.Type_CODE_INT32:
+			dest = &sql.NullInt32{}
+		case runtimev1.Type_CODE_INT64:
+			dest = &sql.NullInt64{}
+		case runtimev1.Type_CODE_INT128:
+			// LARGEINT - scan as string to avoid overflow
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_FLOAT32:
+			// FLOAT - scan as float64 (Go's sql package doesn't have NullFloat32)
+			dest = &sql.NullFloat64{}
+		case runtimev1.Type_CODE_FLOAT64:
+			dest = &sql.NullFloat64{}
+		case runtimev1.Type_CODE_DECIMAL:
+			// DECIMAL - scan as string to preserve precision
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_STRING:
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_DATE:
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_TIMESTAMP:
+			dest = &sql.NullTime{}
+		case runtimev1.Type_CODE_JSON:
+			// JSON - scan as string
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_ARRAY:
+			// ARRAY - scan as string (JSON representation)
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_MAP:
+			// MAP - scan as string (JSON representation)
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_STRUCT:
+			// STRUCT - scan as string (JSON representation)
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_BYTES:
+			// BINARY/VARBINARY - keep as any for base64 encoding
+			dest = new(any)
+		default:
+			dest = new(any)
+		}
+		scanList[i] = dest
+	}
+	return scanList
+}
+
+// starrocksRows wraps sqlx.Rows to provide MapScan method.
+// This is required because if the correct type is not provided to Scan
+// the MySQL driver (used by StarRocks) returns byte arrays for string/decimal types.
+type starrocksRows struct {
 	*sqlx.Rows
+	scanDest []any
+	colTypes []*sql.ColumnType
 }
 
 // MapScan implements drivers.Rows.
-func (r *sqlRows) MapScan(dest map[string]any) error {
-	return r.Rows.MapScan(dest)
+func (r *starrocksRows) MapScan(dest map[string]any) error {
+	// Scan into pre-allocated typed destinations
+	err := r.Rows.Scan(r.scanDest...)
+	if err != nil {
+		return err
+	}
+
+	// Convert sql.Null* types to actual values and populate map
+	cols, err := r.Rows.Columns()
+	if err != nil {
+		return err
+	}
+
+	for i, col := range cols {
+		if i >= len(r.scanDest) {
+			break
+		}
+
+		var value any
+		switch v := r.scanDest[i].(type) {
+		case *sql.NullBool:
+			if v.Valid {
+				value = v.Bool
+			}
+		case *sql.NullInt16:
+			if v.Valid {
+				value = v.Int16
+			}
+		case *sql.NullInt32:
+			if v.Valid {
+				value = v.Int32
+			}
+		case *sql.NullInt64:
+			if v.Valid {
+				value = v.Int64
+			}
+		case *sql.NullFloat64:
+			if v.Valid {
+				value = v.Float64
+			}
+		case *sql.NullString:
+			if v.Valid {
+				value = v.String
+			}
+		case *sql.NullTime:
+			if v.Valid {
+				value = v.Time
+			}
+		case *any:
+			value = *v
+		}
+		dest[col] = value
+	}
+
+	return nil
 }
 
 // contextWithoutDeadline removes the deadline from the context but preserves cancellation.

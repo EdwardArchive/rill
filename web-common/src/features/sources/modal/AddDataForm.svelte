@@ -441,9 +441,14 @@
         <AddStarRocksForm
           {connector}
           {onClose}
+          {currentOlapConnector}
           setError={(error, details) => {
             starrocksError = error;
             starrocksErrorDetails = details;
+          }}
+          onOlapConfirmationNeeded={(values) => {
+            pendingSubmitValues = values;
+            showOlapChangeConfirm = true;
           }}
           bind:formId={starrocksFormId}
           bind:isSubmitting={starrocksSubmitting}

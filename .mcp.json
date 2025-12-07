@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "frontend-inspector": {
+      "command": "python",
+      "args": [".claude/mcp-servers/frontend-inspector/server.py"],
+      "env": {}
+    }
+  }
+}

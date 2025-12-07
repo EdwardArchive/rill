@@ -107,10 +107,6 @@ If you encounter connection issues:
 4. For SSL connections, verify SSL is enabled on the StarRocks server
 
 
-## Known Limitations
-
-- **Model execution**: Model creation and execution is not yet supported. This feature is under development.
-
 :::info Need help connecting to StarRocks?
 
 If you would like to connect Rill to an existing StarRocks instance, please don't hesitate to [contact us](/contact). We'd love to help!

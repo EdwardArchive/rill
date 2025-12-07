@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/chcol"
 	"github.com/duckdb/duckdb-go/v2"
@@ -120,13 +121,30 @@ func ToValue(v any, t *runtimev1.Type) (*structpb.Value, error) {
 		ms += int64(v.Months) * 30 * 24 * 60 * 60 * 1000
 		return structpb.NewNumberValue(float64(ms)), nil
 	case []byte:
-		if t != nil && t.Code == runtimev1.Type_CODE_UUID {
-			uid, err := uuid.FromBytes(v)
-			if err == nil {
-				return structpb.NewStringValue(uid.String()), nil
+		// Handle special cases where []byte should be converted to string
+		// MySQL protocol (used by StarRocks and MySQL drivers) returns VARCHAR/DECIMAL as []byte
+		if t != nil {
+			switch t.Code {
+			case runtimev1.Type_CODE_UUID:
+				uid, err := uuid.FromBytes(v)
+				if err == nil {
+					return structpb.NewStringValue(uid.String()), nil
+				}
+			case runtimev1.Type_CODE_BYTES:
+				// BINARY/VARBINARY must always be base64 encoded (can contain invalid UTF-8)
+				return structpb.NewStringValue(base64.StdEncoding.EncodeToString(v)), nil
+			case runtimev1.Type_CODE_STRING,
+				runtimev1.Type_CODE_DECIMAL,
+				runtimev1.Type_CODE_INT128:
+				// These types come as []byte from MySQL protocol but should be strings
+				// Validate UTF-8 before converting to string (safety check)
+				if utf8.Valid(v) {
+					return structpb.NewStringValue(string(v)), nil
+				}
+				// If not valid UTF-8, fall through to base64 encoding
 			}
 		}
-		// For actual binary data, encode as base64
+		// For actual binary data, invalid UTF-8, or unknown types, encode as base64
 		return structpb.NewStringValue(base64.StdEncoding.EncodeToString(v)), nil
 	case string:
 		if t != nil {

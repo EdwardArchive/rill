@@ -112,7 +112,8 @@ func (q *ColumnTimeseries) Resolve(ctx context.Context, rt *runtime.Runtime, ins
 		timezone = q.TimeZone
 	}
 
-	// StarRocks uses a different approach: CTE-based query without temporary tables
+	// StarRocks external catalogs don't support TEMPORARY TABLE directly,
+	// so we create temp tables in default_catalog and query external data with fully qualified names.
 	if olap.Dialect() == drivers.DialectStarRocks {
 		return q.resolveStarRocks(ctx, olap, timeRange, priority)
 	}
@@ -406,32 +407,30 @@ func (q *ColumnTimeseries) resolveStarRocks(ctx context.Context, olap drivers.OL
 	// Source table uses fully qualified name (external catalog)
 	sourceTable := dialect.EscapeTable(q.Database, q.DatabaseSchema, q.TableName)
 
-	// For StarRocks, we need to:
-	// 1. Switch to default_catalog to create temp table
-	// 2. Run query with fully qualified source table name
-	// 3. Read results and cleanup
-
-	// First, switch to default_catalog for temp table operations
-	err := olap.Exec(ctx, &drivers.Statement{
-		Query:            "SET CATALOG `default_catalog`",
-		Priority:         priority,
-		ExecutionTimeout: defaultExecutionTimeout,
-	})
-	if err != nil {
-		return fmt.Errorf("switch to default_catalog: %w", err)
+	// For StarRocks, use configured temp_database in default_catalog for temporary tables
+	// This avoids issues with external catalogs where the database may not exist in default_catalog
+	tempDB := "rill_temp" // default value
+	if handle, ok := olap.(drivers.Handle); ok {
+		if cfg := handle.Config(); cfg != nil {
+			if tempDatabase, ok := cfg["temp_database"].(string); ok && tempDatabase != "" {
+				tempDB = tempDatabase
+			}
+		}
 	}
+
+	fullTempTableName := "`default_catalog`.`" + tempDB + "`.`" + temporaryTableName + "`"
 
 	// Ensure we clean up the temp table even on error
 	defer func() {
 		_ = olap.Exec(ctx, &drivers.Statement{
-			Query:            "DROP TABLE IF EXISTS `" + temporaryTableName + "`",
+			Query:            "DROP TEMPORARY TABLE IF EXISTS " + fullTempTableName,
 			Priority:         priority,
 			ExecutionTimeout: defaultExecutionTimeout,
 		})
 	}()
 
 	// Create temp table in default_catalog with data from external catalog
-	createSQL := `CREATE TABLE ` + "`" + temporaryTableName + "`" + ` AS
+	createSQL := `CREATE TEMPORARY TABLE ` + fullTempTableName + ` AS
 		WITH template AS (
 			SELECT DATE_ADD('` + startTimeStr + `', INTERVAL generate_series ` + dateTruncSpecifier + `) AS ` + tsAlias + `
 			FROM TABLE(generate_series(0, TIMESTAMPDIFF(` + dateTruncSpecifier + `, '` + startTimeStr + `', '` + endTimeStr + `')))
@@ -446,7 +445,7 @@ func (q *ColumnTimeseries) resolveStarRocks(ctx context.Context, olap drivers.OL
 		LEFT OUTER JOIN series ON template.` + tsAlias + ` = series.` + tsAlias + `
 		ORDER BY template.` + tsAlias
 
-	err = olap.Exec(ctx, &drivers.Statement{
+	err := olap.Exec(ctx, &drivers.Statement{
 		Query:            createSQL,
 		Priority:         priority,
 		ExecutionTimeout: defaultExecutionTimeout,
@@ -455,9 +454,9 @@ func (q *ColumnTimeseries) resolveStarRocks(ctx context.Context, olap drivers.OL
 		return fmt.Errorf("create temp table: %w", err)
 	}
 
-	// Query results from temp table
+	// Query results from temp table (use fully qualified name)
 	rows, err := olap.Query(ctx, &drivers.Statement{
-		Query:            "SELECT * FROM `" + temporaryTableName + "`",
+		Query:            "SELECT * FROM " + fullTempTableName,
 		Priority:         priority,
 		ExecutionTimeout: defaultExecutionTimeout,
 	})
@@ -926,124 +925,4 @@ func epochFromTimestamp(safeColName string, dialect drivers.Dialect) string {
 	default:
 		return `extract('epoch' from ` + safeColName + `)`
 	}
-}
-
-// resolveStarRocks handles StarRocks-specific time series resolution.
-// StarRocks doesn't support temporary tables in external catalogs, so we use
-// a CTE-based approach with fully qualified table names.
-func (q *ColumnTimeseries) resolveStarRocks(ctx context.Context, olap drivers.OLAPStore, timeRange *runtimev1.TimeSeriesTimeRange, priority int) error {
-	tsAlias := "_ts_"
-
-	if q.FirstDayOfWeek > 7 || q.FirstDayOfWeek <= 0 {
-		q.FirstDayOfWeek = 1
-	}
-
-	if q.FirstMonthOfYear > 12 || q.FirstMonthOfYear <= 0 {
-		q.FirstMonthOfYear = 1
-	}
-
-	dialect := olap.Dialect()
-	dateTruncSpecifier := dialect.ConvertToDateTruncSpecifier(timeRange.Interval)
-	measures := normaliseMeasures(q.Measures, q.Pixels != 0)
-
-	startTimeStr := timeRange.Start.AsTime().Format("2006-01-02 15:04:05")
-	endTimeStr := timeRange.End.AsTime().Format("2006-01-02 15:04:05")
-
-	// Build COALESCE statements for measures
-	var coalesceStatements string
-	for i, measure := range measures {
-		safeMeasureName := safeName(dialect, measure.SqlName)
-		coalesceStatements += `COALESCE(` + safeMeasureName + `, 0) as ` + safeMeasureName
-		if i < len(measures)-1 {
-			coalesceStatements += ", "
-		}
-	}
-
-	colSQL := `date_trunc('` + dateTruncSpecifier + `', ` + safeName(dialect, q.TimestampColumnName) + `)`
-
-	// Source table uses fully qualified name
-	sourceTable := dialect.EscapeTable(q.Database, q.DatabaseSchema, q.TableName)
-
-	// Build CTE-based query (no temporary table creation)
-	querySQL := `
-		WITH template AS (
-			SELECT DATE_ADD('` + startTimeStr + `', INTERVAL generate_series ` + dateTruncSpecifier + `) AS ` + tsAlias + `
-			FROM TABLE(generate_series(0, TIMESTAMPDIFF(` + dateTruncSpecifier + `, '` + startTimeStr + `', '` + endTimeStr + `')))
-		),
-		series AS (
-			SELECT ` + colSQL + ` AS ` + tsAlias + `, ` + getExpressionColumnsFromMeasures(dialect, measures) + `
-			FROM ` + sourceTable + `
-			GROUP BY ` + tsAlias + `
-		)
-		SELECT template.` + tsAlias + `, ` + coalesceStatements + `
-		FROM template
-		LEFT OUTER JOIN series ON template.` + tsAlias + ` = series.` + tsAlias + `
-		ORDER BY template.` + tsAlias
-
-	rows, err := olap.Query(ctx, &drivers.Statement{
-		Query:            querySQL,
-		Priority:         priority,
-		ExecutionTimeout: defaultExecutionTimeout,
-	})
-	if err != nil {
-		return fmt.Errorf("starrocks timeseries query: %w", err)
-	}
-	defer rows.Close()
-
-	// Omit the time value from the result schema
-	schema := rows.Schema
-	if schema != nil {
-		for i, f := range schema.Fields {
-			if f.Name == tsAlias {
-				schema.Fields = slices.Delete(schema.Fields, i, i+1)
-				break
-			}
-		}
-	}
-
-	var data []*runtimev1.TimeSeriesValue
-	rowMap := make(map[string]any)
-	for rows.Next() {
-		err := rows.MapScan(rowMap)
-		if err != nil {
-			return err
-		}
-
-		var t time.Time
-		switch v := rowMap[tsAlias].(type) {
-		case time.Time:
-			t = v
-		default:
-			return fmt.Errorf("unexpected type for timestamp column: %T", v)
-		}
-		delete(rowMap, tsAlias)
-
-		records, err := pbutil.ToStruct(rowMap, schema)
-		if err != nil {
-			return err
-		}
-
-		tpb := timestamppb.New(t)
-		if err := tpb.CheckValid(); err != nil {
-			return err
-		}
-
-		data = append(data, &runtimev1.TimeSeriesValue{
-			Ts:      tpb,
-			Records: records,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	meta := structTypeToMetricsViewColumn(rows.Schema)
-
-	// Note: Spark values not supported for StarRocks (requires temp tables for M4 algorithm)
-	q.Result = &ColumnTimeseriesResult{
-		Meta:    meta,
-		Results: data,
-		Spark:   nil,
-	}
-	return nil
 }

@@ -311,9 +311,6 @@ func (e *starrocksToSelfExecutor) createTableAsSelectCrossConnector(ctx context.
 
 	// Set INPUT connector's catalog/database context for SELECT
 	// This allows unqualified table references in SQL to resolve to input catalog
-	if err := switchCatalogContext(ctx, conn, e.inputConn.configProp.Catalog, e.inputConn.configProp.Database); err != nil {
-		return fmt.Errorf("switch to input catalog context: %w", err)
-	}
 
 	// Build fully qualified OUTPUT table name: catalog.database.table
 	fullTableName := safeSQLName(outputCatalog)
@@ -356,9 +353,7 @@ func (e *starrocksToSelfExecutor) insertIntoTableCrossConnector(ctx context.Cont
 	defer conn.Close()
 
 	// Set INPUT connector's catalog/database context for SELECT
-	if err := switchCatalogContext(ctx, conn, e.inputConn.configProp.Catalog, e.inputConn.configProp.Database); err != nil {
-		return fmt.Errorf("switch to input catalog context: %w", err)
-	}
+	// This allows unqualified table references in SQL to resolve to input catalog
 
 	// Build fully qualified OUTPUT table name
 	fullTableName := safeSQLName(outputCatalog)
@@ -395,11 +390,6 @@ func (c *connection) createTableAsSelect(ctx context.Context, name, sql string, 
 		return fmt.Errorf("create connection: %w", err)
 	}
 	defer conn.Close()
-
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
 
 	// Build fully-qualified table name using connector's database
 	tableName := safeSQLName(name)
@@ -617,11 +607,6 @@ func (c *connection) dropTable(ctx context.Context, name string, isView bool) er
 	}
 	defer conn.Close()
 
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
-
 	// Build fully-qualified table name using connector's database
 	tableName := safeSQLName(name)
 	if c.configProp.Database != "" {
@@ -653,11 +638,6 @@ func (c *connection) dropTableOrView(ctx context.Context, name string) error {
 	}
 	defer conn.Close()
 
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
-
 	// Build fully-qualified table name using connector's database
 	tableName := safeSQLName(name)
 	if c.configProp.Database != "" {
@@ -685,10 +665,7 @@ func (c *connection) renameTable(ctx context.Context, oldName, newName string, i
 	}
 	defer conn.Close()
 
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
+	
 
 	// Build fully-qualified table names using connector's database
 	oldTableName := safeSQLName(oldName)
@@ -755,11 +732,6 @@ func (c *connection) insertIntoTable(ctx context.Context, name, sql string, prop
 	}
 	defer conn.Close()
 
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
-
 	// Build fully-qualified table name using connector's database
 	tableName := safeSQLName(name)
 	if c.configProp.Database != "" {
@@ -778,7 +750,3 @@ func (c *connection) insertIntoTable(ctx context.Context, name, sql string, prop
 }
 
 // safeSQLName escapes a SQL identifier.
-func safeSQLName(name string) string {
-	// Use backticks for StarRocks/MySQL compatibility
-	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
-}

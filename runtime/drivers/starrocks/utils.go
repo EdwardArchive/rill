@@ -66,8 +66,3 @@ func EscapeReservedKeyword(keyword string) string {
 	}
 	return keyword
 }
-
-// Note: switchCatalogContext is intentionally NOT included.
-// This driver uses fully qualified table names (catalog.database.table)
-// instead of SET CATALOG/USE commands for better compatibility with
-// external catalogs and connection pooling.

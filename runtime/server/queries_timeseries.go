@@ -72,6 +72,8 @@ func (s *Server) ColumnTimeSeries(ctx context.Context, req *runtimev1.ColumnTime
 
 	q := &queries.ColumnTimeseries{
 		Connector:           req.Connector,
+		Database:            req.Database,
+		DatabaseSchema:      req.DatabaseSchema,
 		TableName:           req.TableName,
 		TimestampColumnName: req.TimestampColumnName,
 		Measures:            req.Measures,
