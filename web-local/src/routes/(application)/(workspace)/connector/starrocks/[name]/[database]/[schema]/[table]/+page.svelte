@@ -7,8 +7,9 @@
 
   const { readOnly } = featureFlags;
 
+  // StarRocks uses catalog.database.table format
+  // database = StarRocks catalog, schema = StarRocks database
   $: name = $page.params.name;
-  // StarRocks: database = catalog, schema = database
   $: database = $page.params.database;
   $: databaseSchema = $page.params.schema;
   $: table = $page.params.table;

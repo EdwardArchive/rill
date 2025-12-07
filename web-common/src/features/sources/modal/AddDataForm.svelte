@@ -9,6 +9,7 @@
 
   import type { AddDataFormType, ConnectorType } from "./types";
   import AddClickHouseForm from "./AddClickHouseForm.svelte";
+  import AddStarRocksForm from "./AddStarRocksForm.svelte";
   import NeedHelpText from "./NeedHelpText.svelte";
   import Tabs from "@rilldata/web-common/components/forms/Tabs.svelte";
   import { TabsContent } from "@rilldata/web-common/components/tabs";
@@ -150,6 +151,15 @@
   let clickhouseOlapConfirmationSubmitting: boolean = false;
 
 
+  let starrocksError: string | null = null;
+  let starrocksErrorDetails: string | undefined = undefined;
+  let starrocksFormId: string = "";
+  let starrocksSubmitting: boolean;
+  let starrocksIsSubmitDisabled: boolean;
+  let starrocksParamsForm;
+  let starrocksDsnForm;
+  let starrocksShowSaveAnyway: boolean = false;
+
   $: isSubmitDisabled = (() => {
     if (onlyDsn || connectionTab === "dsn") {
       // DSN form: check required DSN properties
@@ -234,11 +244,17 @@
         ? connectionTab === "dsn"
           ? $clickhouseDsnForm
           : $clickhouseParamsForm
-        : onlyDsn || connectionTab === "dsn"
-          ? $dsnForm
-          : $paramsForm;
+        : connector.name === "starrocks"
+          ? connectionTab === "dsn"
+            ? $starrocksDsnForm
+            : $starrocksParamsForm
+          : onlyDsn || connectionTab === "dsn"
+            ? $dsnForm
+            : $paramsForm;
     if (connector.name === "clickhouse") {
       clickhouseSubmitting = true;
+    } else if (connector.name === "starrocks") {
+      starrocksSubmitting = true;
     }
     const result = await formManager.saveConnectorAnyway({
       queryClient,
@@ -249,6 +265,14 @@
       onClose();
     } else {
       if (connector.name === "clickhouse") {
+        if (connectionTab === "dsn") {
+          dsnError = result.message;
+          dsnErrorDetails = result.details;
+        } else {
+          paramsError = result.message;
+          paramsErrorDetails = result.details;
+        }
+      } else if (connector.name === "starrocks") {
         if (connectionTab === "dsn") {
           dsnError = result.message;
           dsnErrorDetails = result.details;
@@ -267,6 +291,8 @@
     saveAnyway = false;
     if (connector.name === "clickhouse") {
       clickhouseSubmitting = false;
+    } else if (connector.name === "starrocks") {
+      starrocksSubmitting = false;
     }
   }
 
@@ -283,12 +309,14 @@
     clickhouseConnectorType,
     clickhouseParamsValues: $clickhouseParamsForm,
     clickhouseDsnValues: $clickhouseDsnForm,
+    starrocksParamsValues: $starrocksParamsForm,
+    starrocksDsnValues: $starrocksDsnForm,
   });
-  $: isClickhouse = connector.name === "clickhouse";
+  $: isCustomForm = connector.name === "clickhouse" || connector.name === "starrocks";
   $: shouldShowSaveAnywayButton =
-    isConnectorForm && (showSaveAnyway || clickhouseShowSaveAnyway);
-  $: saveAnywayLoading = isClickhouse
-    ? clickhouseSubmitting && saveAnyway
+    isConnectorForm && (showSaveAnyway || clickhouseShowSaveAnyway || starrocksShowSaveAnyway);
+  $: saveAnywayLoading = isCustomForm
+    ? (connector.name === "clickhouse" ? clickhouseSubmitting : starrocksSubmitting) && saveAnyway
     : submitting && saveAnyway;
 
   $: handleOnUpdate = formManager.makeOnUpdate({
@@ -408,6 +436,22 @@
           bind:paramsForm={clickhouseParamsForm}
           bind:dsnForm={clickhouseDsnForm}
           bind:showSaveAnyway={clickhouseShowSaveAnyway}
+        />
+      {:else if connector.name === "starrocks"}
+        <AddStarRocksForm
+          {connector}
+          {onClose}
+          setError={(error, details) => {
+            starrocksError = error;
+            starrocksErrorDetails = details;
+          }}
+          bind:formId={starrocksFormId}
+          bind:isSubmitting={starrocksSubmitting}
+          bind:isSubmitDisabled={starrocksIsSubmitDisabled}
+          bind:connectionTab
+          bind:paramsForm={starrocksParamsForm}
+          bind:dsnForm={starrocksDsnForm}
+          bind:showSaveAnyway={starrocksShowSaveAnyway}
         />
       {:else if hasDsnFormOption}
         <Tabs
@@ -539,19 +583,23 @@
 
         <Button
           disabled={connector.name === "clickhouse"
-            ? clickhouseSubmitting || clickhouseIsSubmitDisabled || clickhouseOlapConfirmationSubmitting
-            : submitting || isSubmitDisabled || isOlapConfirmationSubmitting}
+            ? clickhouseSubmitting || clickhouseIsSubmitDisabled
+            : connector.name === "starrocks"
+              ? starrocksSubmitting || starrocksIsSubmitDisabled
+              : submitting || isSubmitDisabled}
           loading={connector.name === "clickhouse"
-            ? clickhouseSubmitting || clickhouseOlapConfirmationSubmitting
-            : submitting || isOlapConfirmationSubmitting}
-          loadingCopy={connector.name === "clickhouse"
-            ? clickhouseOlapConfirmationSubmitting
-              ? "Saving..."
-              : "Connecting..."
-            : isOlapConfirmationSubmitting
-              ? "Saving..."
-              : "Testing connection..."}
-          form={connector.name === "clickhouse" ? clickhouseFormId : formId}
+            ? clickhouseSubmitting
+            : connector.name === "starrocks"
+              ? starrocksSubmitting
+              : submitting}
+          loadingCopy={connector.name === "clickhouse" || connector.name === "starrocks"
+            ? "Connecting..."
+            : "Testing connection..."}
+          form={connector.name === "clickhouse"
+            ? clickhouseFormId
+            : connector.name === "starrocks"
+              ? starrocksFormId
+              : formId}
           submitForm
           type="primary"
         >
@@ -571,12 +619,14 @@
   <div
     class="add-data-side-panel flex flex-col gap-6 p-6 bg-surface w-full max-w-full border-l-0 border-t mt-6 pl-0 pt-6 md:w-96 md:min-w-[320px] md:max-w-[400px] md:border-l md:border-t-0 md:mt-0 md:pl-6"
   >
-    {#if dsnError || paramsError || clickhouseError}
+    {#if dsnError || paramsError || clickhouseError || starrocksError}
       <SubmissionError
         message={clickhouseError ??
+          starrocksError ??
           (onlyDsn || connectionTab === "dsn" ? dsnError : paramsError) ??
           ""}
         details={clickhouseErrorDetails ??
+          starrocksErrorDetails ??
           (onlyDsn || connectionTab === "dsn"
             ? dsnErrorDetails
             : paramsErrorDetails) ??

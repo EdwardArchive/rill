@@ -76,4 +76,5 @@ export const TALL_FORM_CONNECTORS = new Set([
   "clickhouse",
   "snowflake",
   "salesforce",
+  "starrocks",
 ]);

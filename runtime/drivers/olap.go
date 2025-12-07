@@ -679,7 +679,7 @@ func (d Dialect) SelectTimeRangeBins(start, end time.Time, grain runtimev1.TimeG
 		// StarRocks uses UNION ALL for generating time series
 		var sb strings.Builder
 		first := true
-		for t := start; t.Before(end); t = timeutil.OffsetTime(t, timeutil.TimeGrainFromAPI(grain), 1, tz) {
+		for t := start; t.Before(end); t = timeutil.OffsetTime(t, g, 1, tz) {
 			if !first {
 				sb.WriteString(" UNION ALL ")
 			}

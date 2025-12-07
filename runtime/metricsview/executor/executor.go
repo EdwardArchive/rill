@@ -159,6 +159,8 @@ func (e *Executor) Timestamps(ctx context.Context, timeDim string) (metricsview.
 		res, err = e.resolvePinot(ctx, timeExpr)
 	case drivers.DialectDruid:
 		res, err = e.resolveDruid(ctx, timeExpr)
+	case drivers.DialectStarRocks:
+		res, err = e.resolveStarRocks(ctx, timeExpr)
 	default:
 		return metricsview.TimestampsResult{}, fmt.Errorf("not available for dialect '%s'", e.olap.Dialect())
 	}
@@ -487,7 +489,7 @@ func (e *Executor) Search(ctx context.Context, qry *metricsview.SearchQuery, exe
 		}
 		q := &metricsview.Query{
 			MetricsView:         qry.MetricsView,
-			Dimensions:          []metricsview.Dimension{{Name: d}},
+			Dimensions:          []metricsview.Dimension{{Name: d, Compute: nil}},
 			Measures:            nil,
 			PivotOn:             nil,
 			Spine:               nil,

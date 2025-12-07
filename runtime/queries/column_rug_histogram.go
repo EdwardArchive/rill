@@ -81,15 +81,23 @@ func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, i
 	sanitizedColumnName := safeName(olap.Dialect(), q.ColumnName)
 	outlierPseudoBucketCount := 500
 
-	var castDouble, castFloat string
+	// StarRocks uses CAST() function instead of ::TYPE syntax
+	var selectColumn string
 	if olap.Dialect() == drivers.DialectStarRocks {
-		castDouble = starrocks.GetTypeCast("DOUBLE")
-		castFloat = starrocks.GetTypeCast("FLOAT")
+		selectColumn = fmt.Sprintf("CAST(%s AS DOUBLE)", sanitizedColumnName)
 	} else {
-		castDouble = "::DOUBLE"
+		selectColumn = fmt.Sprintf("%s::DOUBLE", sanitizedColumnName)
+	}
+
+	// For bucket column casting
+	var castFloat string
+	if olap.Dialect() == drivers.DialectStarRocks {
+		castFloat = ""
+	} else {
 		castFloat = "::FLOAT"
 	}
 
+	// StarRocks: "values" is a reserved keyword
 	var valuesAlias string
 	if olap.Dialect() == drivers.DialectStarRocks {
 		valuesAlias = starrocks.EscapeReservedKeyword("values")
@@ -104,8 +112,6 @@ func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, i
 	} else {
 		whereClause = "WHERE present=true"
 	}
-
-	selectColumn := fmt.Sprintf("%s%s", sanitizedColumnName, castDouble)
 
 	rugSQL := fmt.Sprintf(
 		`

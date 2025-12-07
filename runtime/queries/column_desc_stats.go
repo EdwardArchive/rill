@@ -95,6 +95,18 @@ func (q *ColumnDescriptiveStatistics) Resolve(ctx context.Context, rt *runtime.R
 			FROM %[2]s WHERE `+isNonNullFinite(olap.Dialect(), sanitizedColumnName)+``,
 			sanitizedColumnName,
 			olap.Dialect().EscapeTable(q.Database, q.DatabaseSchema, q.TableName))
+	case drivers.DialectStarRocks:
+		descriptiveStatisticsSQL = fmt.Sprintf("SELECT "+
+			"CAST(min(%[1]s) AS DOUBLE) as min, "+
+			"CAST(percentile_approx(%[1]s, 0.25) AS DOUBLE) as q25, "+
+			"CAST(percentile_approx(%[1]s, 0.5) AS DOUBLE) as q50, "+
+			"CAST(percentile_approx(%[1]s, 0.75) AS DOUBLE) as q75, "+
+			"CAST(max(%[1]s) AS DOUBLE) as max, "+
+			"CAST(avg(%[1]s) AS DOUBLE) as mean, "+
+			"CAST(stddev_samp(%[1]s) AS DOUBLE) as sd "+
+			"FROM %[2]s WHERE %[1]s IS NOT NULL",
+			sanitizedColumnName,
+			olap.Dialect().EscapeTable(q.Database, q.DatabaseSchema, q.TableName))
 	default:
 		return fmt.Errorf("not available for dialect '%s'", olap.Dialect())
 	}

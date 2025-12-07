@@ -218,18 +218,23 @@ export const getYupSchema = {
 
   starrocks: yup.object().shape({
     dsn: yup.string().optional(),
-    host: yup.string().optional(),
+    host: yup
+      .string()
+      .required("Host is required")
+      .matches(
+        /^(?!https?:\/\/)[a-zA-Z0-9.-]+$/,
+        "Do not prefix the host with `http(s)://`",
+      ),
     port: yup
-      .string() // Purposefully using a string input, not a numeric input
+      .string()
       .matches(/^\d+$/, "Port must be a number")
-      .optional(),
-    username: yup.string().optional(),
-    password: yup.string().optional(),
-    catalog: yup.string().optional(), // StarRocks catalog (default: default_catalog)
+      .default("9030"),
+    username: yup.string().required("Username is required"),
+    password: yup.string(),
+    catalog: yup.string().required("Catalog is required").default("default_catalog"),
     database: yup.string().optional(),
-    ssl: yup.boolean().optional(),
-    log_queries: yup.boolean().optional(),
-    name: yup.string(), // Required for typing
+    ssl: yup.boolean(),
+    name: yup.string(),
   }),
 };
 
