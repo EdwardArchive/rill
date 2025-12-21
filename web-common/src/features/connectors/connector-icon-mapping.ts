@@ -12,6 +12,7 @@ import RedshiftIcon from "../../components/icons/connectors/RedshiftIcon.svelte"
 import SnowflakeIcon from "../../components/icons/connectors/SnowflakeIcon.svelte";
 import StarRocksIcon from "../../components/icons/connectors/StarRocksIcon.svelte";
 import ClickHouseCloudIcon from "../../components/icons/connectors/ClickHouseCloudIcon.svelte";
+import StarRocksIcon from "../../components/icons/connectors/StarRocksIcon.svelte";
 
 export const connectorIconMapping = {
   athena: AthenaIcon,

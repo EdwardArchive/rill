@@ -8,7 +8,6 @@ import (
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime"
 	"github.com/rilldata/rill/runtime/drivers"
-	"github.com/rilldata/rill/runtime/drivers/starrocks"
 )
 
 type ColumnRugHistogram struct {
@@ -78,24 +77,27 @@ func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, i
 		return nil
 	}
 
-	sanitizedColumnName := safeName(olap.Dialect(), q.ColumnName)
+	sanitizedColumnName := olap.Dialect().EscapeIdentifier(q.ColumnName)
 	outlierPseudoBucketCount := 500
 
-	var castDouble, castFloat string
+	// StarRocks uses CAST() function instead of ::TYPE syntax
+	var selectColumn string
 	if olap.Dialect() == drivers.DialectStarRocks {
-		castDouble = starrocks.GetTypeCast("DOUBLE")
-		castFloat = starrocks.GetTypeCast("FLOAT")
+		selectColumn = fmt.Sprintf("CAST(%s AS DOUBLE)", sanitizedColumnName)
 	} else {
-		castDouble = "::DOUBLE"
+		selectColumn = fmt.Sprintf("%s::DOUBLE", sanitizedColumnName)
+	}
+
+	// For bucket column casting
+	var castFloat string
+	if olap.Dialect() == drivers.DialectStarRocks {
+		castFloat = ""
+	} else {
 		castFloat = "::FLOAT"
 	}
 
-	var valuesAlias string
-	if olap.Dialect() == drivers.DialectStarRocks {
-		valuesAlias = starrocks.EscapeReservedKeyword("values")
-	} else {
-		valuesAlias = "values"
-	}
+	// StarRocks: "values" is a reserved keyword, use alias
+	valuesAlias := "vals"
 
 	// StarRocks doesn't support referencing SELECT column aliases in WHERE clause
 	var whereClause string
@@ -104,8 +106,6 @@ func (q *ColumnRugHistogram) Resolve(ctx context.Context, rt *runtime.Runtime, i
 	} else {
 		whereClause = "WHERE present=true"
 	}
-
-	selectColumn := fmt.Sprintf("%s%s", sanitizedColumnName, castDouble)
 
 	rugSQL := fmt.Sprintf(
 		`

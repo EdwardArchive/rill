@@ -9,7 +9,6 @@ import (
 	runtimev1 "github.com/rilldata/rill/proto/gen/rill/runtime/v1"
 	"github.com/rilldata/rill/runtime"
 	"github.com/rilldata/rill/runtime/drivers"
-	"github.com/rilldata/rill/runtime/drivers/starrocks"
 )
 
 type ColumnNumericHistogram struct {
@@ -79,7 +78,7 @@ func (q *ColumnNumericHistogram) Export(ctx context.Context, rt *runtime.Runtime
 }
 
 func (q *ColumnNumericHistogram) calculateBucketSize(ctx context.Context, olap drivers.OLAPStore, priority int) (float64, error) {
-	sanitizedColumnName := safeName(olap.Dialect(), q.ColumnName)
+	sanitizedColumnName := olap.Dialect().EscapeIdentifier(q.ColumnName)
 	var qryString string
 	switch olap.Dialect() {
 	case drivers.DialectDuckDB:
@@ -87,7 +86,6 @@ func (q *ColumnNumericHistogram) calculateBucketSize(ctx context.Context, olap d
 	case drivers.DialectClickHouse:
 		qryString = "SELECT (quantileTDigest(0.75)(%s)-quantileTDigest(0.25)(%s)) AS iqr, uniq(%s) AS count, (max(%s) - min(%s)) AS range FROM %s"
 	case drivers.DialectStarRocks:
-		// StarRocks doesn't support ::DOUBLE syntax
 		qryString = "SELECT (percentile_approx(%s, 0.75)-percentile_approx(%s, 0.25)) AS iqr, approx_count_distinct(%s) AS count, (max(%s) - min(%s)) AS `range` FROM %s"
 	default:
 		return 0, fmt.Errorf("unsupported dialect %v", olap.Dialect())
@@ -166,7 +164,7 @@ func (q *ColumnNumericHistogram) calculateFDMethod(ctx context.Context, rt *runt
 		return nil
 	}
 
-	sanitizedColumnName := safeName(olap.Dialect(), q.ColumnName)
+	sanitizedColumnName := olap.Dialect().EscapeIdentifier(q.ColumnName)
 	bucketSize, err := q.calculateBucketSize(ctx, olap, priority)
 	if err != nil {
 		return err
@@ -176,21 +174,27 @@ func (q *ColumnNumericHistogram) calculateFDMethod(ctx context.Context, rt *runt
 		return nil
 	}
 
-	var castDouble string
+	// StarRocks uses CAST() function instead of ::TYPE syntax
+	var selectColumn string
 	if olap.Dialect() == drivers.DialectStarRocks {
-		castDouble = starrocks.GetTypeCast("DOUBLE")
+		sanitizedColumnName = olap.Dialect().EscapeIdentifier(q.ColumnName)
+		selectColumn = fmt.Sprintf("CAST(%s AS DOUBLE)", sanitizedColumnName)
 	} else {
-		castDouble = "::DOUBLE"
+		selectColumn = fmt.Sprintf("%s::DOUBLE", sanitizedColumnName)
 	}
 
-	var valuesAlias string
+	// For bucket column casting - generate_series returns BIGINT, cast to DOUBLE for calculations
+	// StarRocks: CAST(column AS DOUBLE)
+	// DuckDB/ClickHouse: column::DOUBLE
+	var bucketColumn string
 	if olap.Dialect() == drivers.DialectStarRocks {
-		valuesAlias = starrocks.EscapeReservedKeyword("values")
+		bucketColumn = fmt.Sprintf("CAST(%s AS DOUBLE)", rangeNumbersCol(olap.Dialect()))
 	} else {
-		valuesAlias = "values"
+		bucketColumn = rangeNumbersCol(olap.Dialect()) + "::DOUBLE"
 	}
 
-	selectColumn := fmt.Sprintf("%s%s", sanitizedColumnName, castDouble)
+	// StarRocks: "values" is a reserved keyword, use alias
+	valuesAlias := "vals"
 	histogramSQL := fmt.Sprintf(
 		`
           WITH data_table AS (
@@ -202,7 +206,7 @@ func (q *ColumnNumericHistogram) calculateFDMethod(ctx context.Context, rt *runt
             WHERE `+isNonNullFinite(olap.Dialect(), sanitizedColumnName)+`
           ), buckets AS (
             SELECT
-              `+rangeNumbersCol(olap.Dialect())+castDouble+` as bucket,
+              `+bucketColumn+` as bucket,
               (bucket) * (%[7]v) / %[4]v + (%[5]v) as low,
               (bucket + 1) * (%[7]v) / %[4]v + (%[5]v) as high
             FROM `+rangeNumbers(olap.Dialect())+`(0, %[4]v`+rangeNumbersEnd(olap.Dialect())+`
@@ -314,28 +318,24 @@ func (q *ColumnNumericHistogram) calculateDiagnosticMethod(ctx context.Context, 
 		bucketCount++
 	}
 
-	sanitizedColumnName := safeName(olap.Dialect(), q.ColumnName)
+	sanitizedColumnName := olap.Dialect().EscapeIdentifier(q.ColumnName)
 
+	// StarRocks uses implicit type conversion instead of ::TYPE syntax
 	var castDouble, castFloat string
 	if olap.Dialect() == drivers.DialectStarRocks {
-		castDouble = starrocks.GetTypeCast("DOUBLE")
-		castFloat = starrocks.GetTypeCast("FLOAT")
+		sanitizedColumnName = olap.Dialect().EscapeIdentifier(q.ColumnName)
+		castDouble = ""
+		castFloat = ""
 	} else {
 		castDouble = "::DOUBLE"
 		castFloat = "::FLOAT"
 	}
 
-	var rangeAlias, valuesAlias string
-	if olap.Dialect() == drivers.DialectStarRocks {
-		rangeAlias = starrocks.EscapeReservedKeyword("range")
-		valuesAlias = starrocks.EscapeReservedKeyword("values")
-	} else {
-		rangeAlias = "range"
-		valuesAlias = "values"
-	}
+	// StarRocks: "values" and "range" are reserved keywords, use aliases
+	valuesAlias := "vals"
+	rangeAlias := "valRange"
 
 	selectColumn := fmt.Sprintf("%s%s", sanitizedColumnName, castDouble)
-
 	histogramSQL := fmt.Sprintf(
 		`
 		WITH data_table AS (
@@ -355,7 +355,7 @@ func (q *ColumnNumericHistogram) calculateDiagnosticMethod(ctx context.Context, 
 			SELECT
 				`+rangeNumbersCol(olap.Dialect())+castFloat+` as bucket,
 				(bucket * %[7]f`+castFloat+` + %[5]f) as low,
-				(bucket * %[7]f`+castFloat+` + %7f`+castFloat+` / 2 + %[5]f) as midpoint,
+				(bucket * %[7]f`+castFloat+` + %[7]f`+castFloat+` / 2 + %[5]f) as midpoint,
 				((bucket + 1) * %[7]f`+castFloat+` + %[5]f) as high
 			FROM `+rangeNumbers(olap.Dialect())+`(0, %[4]d`+rangeNumbersEnd(olap.Dialect())+`
 		),
@@ -384,14 +384,14 @@ func (q *ColumnNumericHistogram) calculateDiagnosticMethod(ctx context.Context, 
 			SELECT count(*) as c from `+valuesAlias+` WHERE value = %[6]f
 		)
 		SELECT
-			COALESCE(bucket, 0) AS bucket,
-			COALESCE(low, 0) AS low,
-			COALESCE(high, 0) AS high,
-			COALESCE(midpoint, 0) AS midpoint,
+			bucket,
+			low,
+			high,
+			midpoint,
 		-- fill in the case where we've filtered out the highest value and need to recompute it, otherwise use count.
 		ifNull(CASE WHEN high = (SELECT max(high) from histogram_stage) THEN count + (select c from right_edge) ELSE count END, 0) AS count
 		FROM histogram_stage
-		ORDER BY bucket
+    ORDER BY bucket
 		`,
 		selectColumn,
 		sanitizedColumnName,
@@ -436,24 +436,18 @@ func (q *ColumnNumericHistogram) calculateDiagnosticMethod(ctx context.Context, 
 
 // getMinMaxRange get min, max and range of values for a given column. This is needed since nesting it in query is throwing error in 0.9.x
 func getMinMaxRange(ctx context.Context, olap drivers.OLAPStore, columnName, database, databaseSchema, tableName string, priority int) (*float64, *float64, *float64, error) {
-	sanitizedColumnName := safeName(olap.Dialect(), columnName)
+	sanitizedColumnName := olap.Dialect().EscapeIdentifier(columnName)
 
-	// Set cast syntax based on dialect
-	var castDouble string
+	// StarRocks uses CAST() instead of ::TYPE syntax
+	var selectColumn string
 	if olap.Dialect() == drivers.DialectStarRocks {
-		castDouble = ""
+		selectColumn = fmt.Sprintf("CAST(%s AS DOUBLE)", sanitizedColumnName)
 	} else {
-		castDouble = "::DOUBLE"
+		selectColumn = fmt.Sprintf("%s::DOUBLE", sanitizedColumnName)
 	}
 
-	selectColumn := fmt.Sprintf("%s%s", sanitizedColumnName, castDouble)
-
-	var rangeAlias string
-	if olap.Dialect() == drivers.DialectStarRocks {
-		rangeAlias = starrocks.EscapeReservedKeyword("range")
-	} else {
-		rangeAlias = "range"
-	}
+	// StarRocks: "range" is a reserved keyword, use backtick escaping
+	rangeAlias := "valRange"
 
 	minMaxSQL := fmt.Sprintf(
 		`
@@ -504,8 +498,9 @@ func isNonNullFinite(d drivers.Dialect, floatCol string) string {
 	case drivers.DialectDuckDB:
 		return fmt.Sprintf("%s IS NOT NULL AND NOT isinf(%s)", floatCol, floatCol)
 	case drivers.DialectStarRocks:
-		// StarRocks doesn't have isinf(), so we check for NULL and valid numeric range
-		return fmt.Sprintf("%s IS NOT NULL", floatCol)
+		// StarRocks doesn't have isinf(), use range check to filter Infinity
+		// -1e308 to 1e308 covers all finite DOUBLE values
+		return fmt.Sprintf("%s IS NOT NULL AND %s > -1e308 AND %s < 1e308", floatCol, floatCol, floatCol)
 	default:
 		return "1=1"
 	}

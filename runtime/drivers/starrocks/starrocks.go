@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
-	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -15,7 +13,6 @@ import (
 	"github.com/rilldata/rill/runtime/pkg/activity"
 	"github.com/rilldata/rill/runtime/storage"
 	"go.uber.org/zap"
-	"golang.org/x/sync/semaphore"
 )
 
 func init() {
@@ -33,8 +30,9 @@ var spec = drivers.Spec{
 			Type:        drivers.StringPropertyType,
 			DisplayName: "StarRocks Connection String",
 			Required:    false,
-			Placeholder: "starrocks://user:password@host:9030/database",
-			Hint:        "Either provide a connection string or fill in the individual fields below",
+			Placeholder: "user:password@tcp(host:9030)/?timeout=30s&readTimeout=300s&parseTime=true",
+			Hint:        "MySQL DSN format only. If provided, do not set host/port/username/password. Catalog and database should be set separately for external catalogs.",
+			Description: "Complete MySQL connection string. Use either DSN or individual fields below, not both.",
 			Secret:      true,
 		},
 		{
@@ -90,7 +88,7 @@ var spec = drivers.Spec{
 			Key:         "database",
 			Type:        drivers.StringPropertyType,
 			DisplayName: "Database",
-			Required:    true,
+			Required:    false,
 			Placeholder: "default",
 			Description: "Name of the StarRocks database to connect to",
 			Hint:        "Database name to use as default",
@@ -120,6 +118,9 @@ var spec = drivers.Spec{
 type driver struct{}
 
 // ConfigProperties defines the configuration for StarRocks connection.
+// NOTE: Timezone configuration is not supported for StarRocks.
+// StarRocks uses server-side timezone settings and queries use UTC by default.
+// Unlike some other drivers, there is no client-side timezone parameter in the DSN.
 type ConfigProperties struct {
 	// DSN is the complete connection string. Either DSN or individual fields should be set.
 	DSN string `mapstructure:"dsn"`
@@ -143,231 +144,114 @@ type ConfigProperties struct {
 
 // Validate checks the configuration for errors.
 func (c *ConfigProperties) Validate() error {
-	// If DSN is provided, it takes precedence and we don't validate individual fields
-	if c.DSN != "" {
-		return nil
+	// Either DSN or individual connection parameters must be provided
+	if c.DSN == "" && c.Host == "" {
+		return errors.New("either DSN or Host must be provided")
 	}
 
-	// If DSN is not provided, host is required
-	if c.Host == "" {
-		return errors.New("invalid config: host is required when DSN is not provided")
+	// If DSN is provided, other connection parameters should not be set
+	// Exception: catalog and database can be set for external catalog configuration
+	if c.DSN != "" {
+		if c.Host != "" || c.Port != 0 || c.Username != "" || c.Password != "" {
+			return errors.New("when DSN is provided, individual connection parameters (host, port, username, password) should not be set")
+		}
 	}
 
 	return nil
 }
 
-// ResolveDSN builds a connection string from individual fields if DSN is not set.
-// For external catalogs, the database is NOT included in DSN because it doesn't exist in default_catalog.
-// The database will be set after connection using SET CATALOG and USE database.
-func (c *ConfigProperties) ResolveDSN() (string, error) {
-	if c.DSN != "" {
-		// Check if DSN uses starrocks:// protocol and convert to MySQL format
-		dsn, err := c.parseDSN(c.DSN)
-		if err != nil {
-			return "", err
-		}
-		return dsn, nil
-	}
+const (
+	defaultCatalog = "default_catalog"
+	defaultPort    = 9030
+)
 
-	// Use mysql.Config to build DSN properly
-	cfg := mysql.NewConfig()
-	cfg.User = c.Username
-	cfg.Passwd = c.Password
-	cfg.Net = "tcp"
-
-	// Set address
-	if strings.Contains(c.Host, ":") {
-		cfg.Addr = c.Host
-	} else {
-		port := c.Port
-		if port == 0 {
-			port = 9030 // StarRocks default MySQL protocol port
-		}
-		cfg.Addr = fmt.Sprintf("%s:%d", c.Host, port)
-	}
-
-	// For external catalogs (non-defaultCatalog), don't include database in DSN
-	// because the database exists in the external catalog, not in defaultCatalog.
-	// MySQL driver would fail to connect if database doesn't exist in defaultCatalog.
-	// The database will be set after connection using SET CATALOG and USE database.
-	if c.Catalog == "" || c.Catalog == defaultCatalog {
-		cfg.DBName = c.Database
-	}
-	// For external catalogs: cfg.DBName remains empty
-
-	// Enable parseTime for DATE/DATETIME conversion
-	// Custom driver will handle edge cases where parsing fails
-	cfg.ParseTime = true
-
-	// Format DSN
-	return cfg.FormatDSN(), nil
-}
-
-// parseDSN parses a StarRocks DSN and converts it to MySQL format.
-// Supports both starrocks:// and standard MySQL DSN formats.
-// starrocks://user:password@host:port/database -> user:password@tcp(host:port)/database?parseTime=true
-// Also extracts database name and stores it in ConfigProperties.Database for later use.
-func (c *ConfigProperties) parseDSN(dsn string) (string, error) {
-	// If DSN doesn't start with starrocks://, assume it's already in MySQL format
-	if !strings.HasPrefix(dsn, "starrocks://") {
-		// Parse MySQL DSN to extract database name
-		cfg, err := mysql.ParseDSN(dsn)
-		if err == nil && cfg.DBName != "" && c.Database == "" {
-			c.Database = cfg.DBName
-		}
-		return dsn, nil
-	}
-
-	// Remove starrocks:// prefix
-	rest := strings.TrimPrefix(dsn, "starrocks://")
-
-	// Split into user:password@host:port/database parts
-	// Format: [user[:password]@]host[:port]/database
-	var username, password, host, database string
-	port := 9030
-
-	// Find @ to separate credentials from host
-	atIdx := strings.Index(rest, "@")
-	var hostPart string
-	if atIdx >= 0 {
-		// Has credentials
-		creds := rest[:atIdx]
-		hostPart = rest[atIdx+1:]
-
-		// Parse credentials
-		colonIdx := strings.Index(creds, ":")
-		if colonIdx >= 0 {
-			username = creds[:colonIdx]
-			password = creds[colonIdx+1:]
-		} else {
-			username = creds
-		}
-	} else {
-		hostPart = rest
-	}
-
-	// Parse host:port/database
-	slashIdx := strings.Index(hostPart, "/")
-	var hostPortPart string
-	if slashIdx >= 0 {
-		hostPortPart = hostPart[:slashIdx]
-		database = hostPart[slashIdx+1:]
-	} else {
-		hostPortPart = hostPart
-	}
-
-	// Parse host:port
-	colonIdx := strings.LastIndex(hostPortPart, ":")
-	if colonIdx >= 0 {
-		host = hostPortPart[:colonIdx]
-		portStr := hostPortPart[colonIdx+1:]
-		if p, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
-			return "", fmt.Errorf("invalid port in StarRocks DSN: %q is not a valid number: %w", portStr, err)
-		} else if p != 1 {
-			return "", fmt.Errorf("invalid port in StarRocks DSN: expected numeric port, got %q", portStr)
-		}
-	} else {
-		host = hostPortPart
-	}
-
-	// Store database in ConfigProperties for later use (e.g., GetTable, Lookup)
-	if database != "" && c.Database == "" {
-		c.Database = database
-	}
-
-	// Build MySQL DSN using mysql.Config
-	cfg := mysql.NewConfig()
-	cfg.User = username
-	cfg.Passwd = password
-	cfg.Net = "tcp"
-	cfg.Addr = fmt.Sprintf("%s:%d", host, port)
-	cfg.DBName = database
-	cfg.ParseTime = true // Enable date/time parsing
-
-	return cfg.FormatDSN(), nil
-}
-
-// Open creates a new StarRocks connection handle.
 func (d driver) Open(instanceID string, config map[string]any, st *storage.Client, ac *activity.Client, logger *zap.Logger) (drivers.Handle, error) {
 	if instanceID == "" {
-		return nil, errors.New("starrocks driver can't be shared")
+		return nil, errors.New("starrocks driver: instance ID is required")
 	}
 
-	conf := &ConfigProperties{}
-	if err := mapstructure.WeakDecode(config, conf); err != nil {
-		return nil, fmt.Errorf("failed to parse config: %w", err)
+	cfg := &ConfigProperties{}
+	if err := mapstructure.WeakDecode(config, cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	if err := conf.Validate(); err != nil {
-		return nil, err
+	// Apply defaults
+	if cfg.Catalog == "" {
+		cfg.Catalog = defaultCatalog
+	}
+	if cfg.Port == 0 {
+		cfg.Port = defaultPort
 	}
 
-	return &connection{
-		config:     config,
-		configProp: conf,
+	conn := &connection{
+		configProp: cfg,
 		logger:     logger,
-		logQueries: conf.LogQueries,
-		dbMu:       semaphore.NewWeighted(1),
-	}, nil
+		activity:   ac,
+	}
+
+	// Open database connection immediately in drivers.Open
+	// This ensures the connection is established and validated upfront
+	if err := conn.initDB(); err != nil {
+		return nil, fmt.Errorf("failed to initialize database connection: %w", err)
+	}
+
+	return conn, nil
 }
 
-// Spec returns the driver specification.
 func (d driver) Spec() drivers.Spec {
 	return spec
 }
 
-// HasAnonymousSourceAccess checks if the source can be accessed without credentials.
 func (d driver) HasAnonymousSourceAccess(ctx context.Context, src map[string]any, logger *zap.Logger) (bool, error) {
 	return false, nil
 }
 
-// TertiarySourceConnectors returns additional connectors needed by this driver.
 func (d driver) TertiarySourceConnectors(ctx context.Context, src map[string]any, logger *zap.Logger) ([]string, error) {
 	return nil, nil
 }
 
-// connection implements the drivers.Handle interface for StarRocks.
 type connection struct {
-	config     map[string]any
 	configProp *ConfigProperties
 	logger     *zap.Logger
-	logQueries bool
+	activity   *activity.Client
 
-	db    *sqlx.DB // lazily populated using getDB
-	dbErr error
-	dbMu  *semaphore.Weighted
+	// db is initialized in drivers.Open
+	db *sqlx.DB
 }
 
-// Ping tests the connection to StarRocks.
-func (c *connection) Ping(ctx context.Context) error {
-	db, err := c.getDB(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open StarRocks connection: %w", err)
-	}
-	return db.PingContext(ctx)
-}
+var _ drivers.Handle = (*connection)(nil)
 
-// Driver returns the driver name.
+// Driver implements drivers.Handle.
 func (c *connection) Driver() string {
 	return "starrocks"
 }
 
-// Config returns the connection configuration.
+// Config implements drivers.Handle.
 func (c *connection) Config() map[string]any {
-	return maps.Clone(c.config)
+	m := make(map[string]any)
+	_ = mapstructure.Decode(c.configProp, &m)
+	return m
 }
 
-// Migrate runs database migrations (no-op for StarRocks).
+// Ping implements drivers.Handle.
+func (c *connection) Ping(ctx context.Context) error {
+	return c.db.PingContext(ctx)
+}
+
+// Migrate implements drivers.Handle.
 func (c *connection) Migrate(ctx context.Context) error {
 	return nil
 }
 
-// MigrationStatus returns the migration status (no-op for StarRocks).
+// MigrationStatus implements drivers.Handle.
 func (c *connection) MigrationStatus(ctx context.Context) (current, desired int, err error) {
 	return 0, 0, nil
 }
 
-// Close closes the database connection.
+// Close implements drivers.Handle.
 func (c *connection) Close() error {
 	if c.db != nil {
 		return c.db.Close()
@@ -407,45 +291,12 @@ func (c *connection) AsOLAP(instanceID string) (drivers.OLAPStore, bool) {
 
 // AsInformationSchema implements drivers.Handle.
 func (c *connection) AsInformationSchema() (drivers.InformationSchema, bool) {
-	return c, true
+	return &informationSchemaImpl{c: c}, true
 }
 
 // AsObjectStore implements drivers.Handle.
 func (c *connection) AsObjectStore() (drivers.ObjectStore, bool) {
 	return nil, false
-}
-
-// AsModelExecutor implements drivers.Handle.
-// Supports both same-connector and cross-connector (StarRocks→StarRocks) execution.
-func (c *connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, error) {
-	// Output must be this connector (follows ClickHouse pattern)
-	if opts.OutputHandle != c {
-		return nil, drivers.ErrNotImplemented
-	}
-
-	// Case 1: Self-to-self execution (same connector instance)
-	if opts.InputHandle == c {
-		return &selfToSelfExecutor{c: c}, nil
-	}
-
-	// Case 2: StarRocks → StarRocks (different connector, e.g., external catalog → default catalog)
-	if opts.InputHandle.Driver() == "starrocks" {
-		inputConn, ok := opts.InputHandle.(*connection)
-		if !ok {
-			return nil, fmt.Errorf("invalid input handle type for StarRocks connector")
-		}
-		return &starrocksToSelfExecutor{
-			inputConn:  inputConn,
-			outputConn: c,
-		}, nil
-	}
-
-	return nil, drivers.ErrNotImplemented
-}
-
-// AsModelManager implements drivers.Handle.
-func (c *connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
-	return c, true
 }
 
 // AsFileStore implements drivers.Handle.
@@ -463,36 +314,113 @@ func (c *connection) AsNotifier(properties map[string]any) (drivers.Notifier, er
 	return nil, drivers.ErrNotNotifier
 }
 
-// getDB lazily initializes and returns a database connection.
-func (c *connection) getDB(ctx context.Context) (*sqlx.DB, error) {
-	err := c.dbMu.Acquire(ctx, 1)
+// AsModelExecutor implements drivers.Handle.
+// StarRocks is a read-only OLAP connector, model execution is not supported.
+func (c *connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, error) {
+	return nil, drivers.ErrNotImplemented
+}
+
+// AsModelManager implements drivers.Handle.
+// StarRocks is a read-only OLAP connector, model management is not supported.
+func (c *connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
+	return nil, false
+}
+
+// initDB initializes the database connection.
+// Called during drivers.Open to establish connection upfront.
+func (c *connection) initDB() error {
+	dsn := c.buildDSN()
+
+	db, err := sqlx.Open("mysql", dsn)
 	if err != nil {
-		return nil, err
-	}
-	defer c.dbMu.Release(1)
-
-	if c.db != nil || c.dbErr != nil {
-		return c.db, c.dbErr
-	}
-
-	dsn, err := c.configProp.ResolveDSN()
-	if err != nil {
-		c.dbErr = err
-		return nil, c.dbErr
-	}
-
-	// Use MySQL driver directly (StarRocks is MySQL-compatible)
-	// Type conversions are handled in the OLAP layer
-	c.db, c.dbErr = sqlx.Open("mysql", dsn)
-	if c.dbErr != nil {
-		return nil, c.dbErr
+		return fmt.Errorf("failed to open database: %w", err)
 	}
 
 	// Configure connection pool
-	c.db.SetMaxOpenConns(10)
-	c.db.SetMaxIdleConns(5)
-	c.db.SetConnMaxIdleTime(time.Minute)
-	c.db.SetConnMaxLifetime(5 * time.Minute)
+	// Rely on database driver's internal connection pooling (uses driver default for MaxOpenConns)
+	// MaxOpenConns set to 20 to default limit concurrent connections
+	db.SetMaxOpenConns(20) // 0 means unlimited
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
-	return c.db, nil
+	// Test connection with an independent context to prevent premature cancellation
+	// Use a context with sufficient timeout (30 seconds) instead of the request context
+	// This prevents 499 errors when the frontend request is cancelled quickly
+	pingCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		db.Close()
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// Validate catalog exists (only if specified and not default_catalog)
+	// This validation happens once during initialization, not on every Ping()
+	// Use catalog's information_schema to verify the catalog is accessible
+	if c.configProp.Catalog != "" && c.configProp.Catalog != defaultCatalog {
+		var dummy int
+		catalogQuery := fmt.Sprintf("SELECT 1 FROM %s.information_schema.schemata LIMIT 1", c.configProp.Catalog)
+		if err := db.QueryRowContext(pingCtx, catalogQuery).Scan(&dummy); err != nil {
+			db.Close()
+			return fmt.Errorf("failed to validate catalog %q: %w", c.configProp.Catalog, err)
+		}
+	}
+
+	// Validate database exists (only if specified)
+	// Use fully qualified path: <catalog>.information_schema.schemata
+	// This validation happens once during initialization, not on every Ping()
+	if c.configProp.Database != "" {
+		catalog := c.configProp.Catalog
+		if catalog == "" {
+			catalog = defaultCatalog
+		}
+
+		var dbCount int
+		dbQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s.information_schema.schemata WHERE schema_name = ?", catalog)
+		if err := db.QueryRowContext(pingCtx, dbQuery, c.configProp.Database).Scan(&dbCount); err != nil {
+			db.Close()
+			return fmt.Errorf("failed to validate database: %w", err)
+		}
+		if dbCount == 0 {
+			db.Close()
+			return fmt.Errorf("database %q does not exist in catalog %q", c.configProp.Database, catalog)
+		}
+	}
+
+	c.db = db
+	return nil
+}
+
+// buildDSN constructs the MySQL DSN from configuration.
+func (c *connection) buildDSN() string {
+	// If DSN is provided, use it as-is (MySQL format expected)
+	if c.configProp.DSN != "" {
+		return c.configProp.DSN
+	}
+
+	// Build DSN from individual fields
+	// Note: We don't set DBName because external catalogs (Iceberg, Hive, etc.)
+	// require SET CATALOG before accessing databases. All queries use fully
+	// qualified table names (catalog.database.table) instead.
+	cfg := mysql.NewConfig()
+	cfg.Net = "tcp"
+	cfg.Addr = fmt.Sprintf("%s:%d", c.configProp.Host, c.configProp.Port)
+	cfg.User = c.configProp.Username
+	cfg.Passwd = c.configProp.Password
+	cfg.ParseTime = true
+	cfg.Loc = time.UTC
+
+	// Set timeouts to prevent connection issues
+	// timeout: connection timeout (30 seconds)
+	// readTimeout: read timeout (300 seconds for long-running queries)
+	// writeTimeout: write timeout (300 seconds, matching readTimeout for consistency)
+	cfg.Timeout = 30 * time.Second
+	cfg.ReadTimeout = 300 * time.Second
+	cfg.WriteTimeout = 300 * time.Second
+
+	if c.configProp.SSL {
+		cfg.TLSConfig = "true"
+	}
+
+	return cfg.FormatDSN()
 }
