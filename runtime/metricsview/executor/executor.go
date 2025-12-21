@@ -180,8 +180,7 @@ func (e *Executor) Timestamps(ctx context.Context, timeDim string) (metricsview.
 
 	var res metricsview.TimestampsResult
 	switch e.olap.Dialect() {
-	case drivers.DialectDuckDB, drivers.DialectStarRocks:
-		// StarRocks uses DuckDB-style SQL
+	case drivers.DialectDuckDB:
 		res, err = e.resolveDuckDB(ctx, timeExpr)
 	case drivers.DialectClickHouse:
 		res, err = e.resolveClickHouse(ctx, timeExpr)

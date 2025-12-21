@@ -298,22 +298,11 @@ func (e *starrocksToSelfExecutor) Execute(ctx context.Context, opts *drivers.Mod
 // Sets input connector's catalog/database context for SELECT, uses fully qualified name for CREATE.
 func (e *starrocksToSelfExecutor) createTableAsSelectCrossConnector(ctx context.Context, name, sql string, props *ModelOutputProperties, outputCatalog, outputDB string) error {
 	// Use output connector's database connection
-	db, err := e.outputConn.getDB(ctx)
-	if err != nil {
-		return err
-	}
-
-	conn, err := db.Connx(ctx)
+	conn, err := e.outputConn.db.Connx(ctx)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)
 	}
 	defer conn.Close()
-
-	// Set INPUT connector's catalog/database context for SELECT
-	// This allows unqualified table references in SQL to resolve to input catalog
-	if err := switchCatalogContext(ctx, conn, e.inputConn.configProp.Catalog, e.inputConn.configProp.Database); err != nil {
-		return fmt.Errorf("switch to input catalog context: %w", err)
-	}
 
 	// Build fully qualified OUTPUT table name: catalog.database.table
 	fullTableName := safeSQLName(outputCatalog)
@@ -344,21 +333,11 @@ func (e *starrocksToSelfExecutor) createTableAsSelectCrossConnector(ctx context.
 // insertIntoTableCrossConnector inserts data into an existing table using cross-connector execution.
 func (e *starrocksToSelfExecutor) insertIntoTableCrossConnector(ctx context.Context, name, sql string, props *ModelOutputProperties, outputCatalog, outputDB string) error {
 	// Use output connector's database connection
-	db, err := e.outputConn.getDB(ctx)
-	if err != nil {
-		return err
-	}
-
-	conn, err := db.Connx(ctx)
+	conn, err := e.outputConn.db.Connx(ctx)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)
 	}
 	defer conn.Close()
-
-	// Set INPUT connector's catalog/database context for SELECT
-	if err := switchCatalogContext(ctx, conn, e.inputConn.configProp.Catalog, e.inputConn.configProp.Database); err != nil {
-		return fmt.Errorf("switch to input catalog context: %w", err)
-	}
 
 	// Build fully qualified OUTPUT table name
 	fullTableName := safeSQLName(outputCatalog)
@@ -384,22 +363,12 @@ func stagingTableNameFor(name string) string {
 
 // createTableAsSelect creates a table or view from a SELECT statement.
 func (c *connection) createTableAsSelect(ctx context.Context, name, sql string, asView bool, props *ModelOutputProperties) error {
-	db, err := c.getDB(ctx)
-	if err != nil {
-		return err
-	}
-
 	// Use a dedicated connection to ensure catalog/database context is maintained
-	conn, err := db.Connx(ctx)
+	conn, err := c.db.Connx(ctx)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)
 	}
 	defer conn.Close()
-
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
 
 	// Build fully-qualified table name using connector's database
 	tableName := safeSQLName(name)
@@ -605,22 +574,13 @@ func (props *ModelOutputProperties) tblConfig() string {
 
 // dropTable drops a table or view.
 func (c *connection) dropTable(ctx context.Context, name string, isView bool) error {
-	db, err := c.getDB(ctx)
-	if err != nil {
-		return err
-	}
-
 	// Use a dedicated connection to ensure catalog/database context is maintained
-	conn, err := db.Connx(ctx)
+	conn, err := c.db.Connx(ctx)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
 
 	// Build fully-qualified table name using connector's database
 	tableName := safeSQLName(name)
@@ -641,22 +601,13 @@ func (c *connection) dropTable(ctx context.Context, name string, isView bool) er
 // dropTableOrView drops a table or view regardless of its type.
 // Tries both DROP TABLE and DROP VIEW to handle cases where the type changed.
 func (c *connection) dropTableOrView(ctx context.Context, name string) error {
-	db, err := c.getDB(ctx)
-	if err != nil {
-		return err
-	}
-
 	// Use a dedicated connection to ensure catalog/database context is maintained
-	conn, err := db.Connx(ctx)
+	conn, err := c.db.Connx(ctx)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
 
 	// Build fully-qualified table name using connector's database
 	tableName := safeSQLName(name)
@@ -673,22 +624,13 @@ func (c *connection) dropTableOrView(ctx context.Context, name string) error {
 
 // renameTable renames a table or recreates a view.
 func (c *connection) renameTable(ctx context.Context, oldName, newName string, isView bool) error {
-	db, err := c.getDB(ctx)
-	if err != nil {
-		return err
-	}
-
 	// Use a dedicated connection to ensure catalog/database context is maintained
-	conn, err := db.Connx(ctx)
+	conn, err := c.db.Connx(ctx)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
 
 	// Build fully-qualified table names using connector's database
 	oldTableName := safeSQLName(oldName)
@@ -743,22 +685,13 @@ func (c *connection) renameTable(ctx context.Context, oldName, newName string, i
 
 // insertIntoTable inserts data into an existing table.
 func (c *connection) insertIntoTable(ctx context.Context, name, sql string, props *ModelOutputProperties) error {
-	db, err := c.getDB(ctx)
-	if err != nil {
-		return err
-	}
-
 	// Use a dedicated connection to ensure catalog/database context is maintained
-	conn, err := db.Connx(ctx)
+	conn, err := c.db.Connx(ctx)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Set catalog and database context
-	if err := c.setCatalogContext(ctx, conn); err != nil {
-		return err
-	}
 
 	// Build fully-qualified table name using connector's database
 	tableName := safeSQLName(name)
@@ -775,10 +708,4 @@ func (c *connection) insertIntoTable(ctx context.Context, name, sql string, prop
 	}
 
 	return fmt.Errorf("incremental strategy %q not supported for StarRocks", strategy)
-}
-
-// safeSQLName escapes a SQL identifier.
-func safeSQLName(name string) string {
-	// Use backticks for StarRocks/MySQL compatibility
-	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }
