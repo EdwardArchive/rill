@@ -79,7 +79,7 @@ func (q *ColumnTimeRange) Resolve(ctx context.Context, rt *runtime.Runtime, inst
 func (q *ColumnTimeRange) resolveDuckDBAndClickhouse(ctx context.Context, olap drivers.OLAPStore, priority int) error {
 	rangeSQL := fmt.Sprintf(
 		"SELECT min(%[1]s) as \"min\", max(%[1]s) as \"max\" FROM %[2]s",
-		safeName(q.ColumnName),
+		olap.Dialect().EscapeIdentifier(q.ColumnName),
 		olap.Dialect().EscapeTable(q.Database, q.DatabaseSchema, q.TableName),
 	)
 
@@ -171,7 +171,7 @@ func (q *ColumnTimeRange) resolveDruid(ctx context.Context, olap drivers.OLAPSto
 	group.Go(func() error {
 		minSQL := fmt.Sprintf(
 			"SELECT min(%[1]s) as \"min\" FROM %[2]s",
-			safeName(q.ColumnName),
+			drivers.DialectDruid.EscapeIdentifier(q.ColumnName),
 			drivers.DialectDruid.EscapeTable(q.Database, q.DatabaseSchema, q.TableName),
 		)
 
@@ -204,7 +204,7 @@ func (q *ColumnTimeRange) resolveDruid(ctx context.Context, olap drivers.OLAPSto
 	group.Go(func() error {
 		maxSQL := fmt.Sprintf(
 			"SELECT max(%[1]s) as \"max\" FROM %[2]s",
-			safeName(q.ColumnName),
+			olap.Dialect().EscapeIdentifier(q.ColumnName),
 			olap.Dialect().EscapeTable(q.Database, q.DatabaseSchema, q.TableName),
 		)
 
