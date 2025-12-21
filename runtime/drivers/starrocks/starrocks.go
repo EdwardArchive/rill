@@ -238,8 +238,7 @@ func (c *connection) Config() map[string]any {
 
 // Ping implements drivers.Handle.
 func (c *connection) Ping(ctx context.Context) error {
-	return 
-	PingContext(ctx)
+	return c.db.PingContext(ctx)
 }
 
 // Migrate implements drivers.Handle.
