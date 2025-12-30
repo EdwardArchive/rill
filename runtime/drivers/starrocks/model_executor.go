@@ -118,6 +118,24 @@ type ModelInputProperties struct {
 	SQL string `mapstructure:"sql"`
 }
 
+// resolveSQL replaces template variables in SQL with actual values.
+// Supported variables: {{catalog}}, {{database}}, {{db}} (alias for database)
+// Users can use these to build fully-qualified table names:
+// Example: SELECT * FROM {{catalog}}.{{database}}.my_table
+func (c *connection) resolveSQL(sql string) string {
+	catalog := c.configProp.Catalog
+	if catalog == "" {
+		catalog = defaultCatalog
+	}
+	database := c.configProp.Database
+
+	// Replace template variables
+	sql = strings.ReplaceAll(sql, "{{catalog}}", safeSQLName(catalog))
+	sql = strings.ReplaceAll(sql, "{{database}}", safeSQLName(database))
+	sql = strings.ReplaceAll(sql, "{{db}}", safeSQLName(database))
+	return sql
+}
+
 // ModelOutputProperties defines output properties for StarRocks models.
 // Reference: https://docs.starrocks.io/docs/sql-reference/sql-statements/table_bucket_part_index/CREATE_TABLE/
 type ModelOutputProperties struct {
@@ -370,11 +388,19 @@ func (c *connection) createTableAsSelect(ctx context.Context, name, sql string, 
 	}
 	defer conn.Close()
 
-	// Build fully-qualified table name using connector's database
-	tableName := safeSQLName(name)
-	if c.configProp.Database != "" {
-		tableName = safeSQLName(c.configProp.Database) + "." + tableName
+	// Build fully-qualified table name: catalog.database.table
+	catalog := c.configProp.Catalog
+	if catalog == "" {
+		catalog = defaultCatalog
 	}
+	tableName := safeSQLName(catalog)
+	if c.configProp.Database != "" {
+		tableName += "." + safeSQLName(c.configProp.Database)
+	}
+	tableName += "." + safeSQLName(name)
+
+	// Resolve template variables in SQL ({{catalog}}, {{database}}, {{db}})
+	sql = c.resolveSQL(sql)
 
 	if asView {
 		// Create view
@@ -581,12 +607,16 @@ func (c *connection) dropTable(ctx context.Context, name string, isView bool) er
 	}
 	defer conn.Close()
 
-
-	// Build fully-qualified table name using connector's database
-	tableName := safeSQLName(name)
-	if c.configProp.Database != "" {
-		tableName = safeSQLName(c.configProp.Database) + "." + tableName
+	// Build fully-qualified table name: catalog.database.table
+	catalog := c.configProp.Catalog
+	if catalog == "" {
+		catalog = defaultCatalog
 	}
+	tableName := safeSQLName(catalog)
+	if c.configProp.Database != "" {
+		tableName += "." + safeSQLName(c.configProp.Database)
+	}
+	tableName += "." + safeSQLName(name)
 
 	var query string
 	if isView {
@@ -608,12 +638,16 @@ func (c *connection) dropTableOrView(ctx context.Context, name string) error {
 	}
 	defer conn.Close()
 
-
-	// Build fully-qualified table name using connector's database
-	tableName := safeSQLName(name)
-	if c.configProp.Database != "" {
-		tableName = safeSQLName(c.configProp.Database) + "." + tableName
+	// Build fully-qualified table name: catalog.database.table
+	catalog := c.configProp.Catalog
+	if catalog == "" {
+		catalog = defaultCatalog
 	}
+	tableName := safeSQLName(catalog)
+	if c.configProp.Database != "" {
+		tableName += "." + safeSQLName(c.configProp.Database)
+	}
+	tableName += "." + safeSQLName(name)
 
 	// Try dropping as table first, then as view
 	// Both use IF EXISTS so they won't error if the object doesn't exist
@@ -631,14 +665,17 @@ func (c *connection) renameTable(ctx context.Context, oldName, newName string, i
 	}
 	defer conn.Close()
 
-
-	// Build fully-qualified table names using connector's database
-	oldTableName := safeSQLName(oldName)
-	newTableName := safeSQLName(newName)
-	if c.configProp.Database != "" {
-		oldTableName = safeSQLName(c.configProp.Database) + "." + oldTableName
-		newTableName = safeSQLName(c.configProp.Database) + "." + newTableName
+	// Build fully-qualified table names: catalog.database.table
+	catalog := c.configProp.Catalog
+	if catalog == "" {
+		catalog = defaultCatalog
 	}
+	prefix := safeSQLName(catalog)
+	if c.configProp.Database != "" {
+		prefix += "." + safeSQLName(c.configProp.Database)
+	}
+	oldTableName := prefix + "." + safeSQLName(oldName)
+	newTableName := prefix + "." + safeSQLName(newName)
 
 	if isView {
 		// StarRocks doesn't support RENAME VIEW, so we need to recreate
@@ -692,12 +729,16 @@ func (c *connection) insertIntoTable(ctx context.Context, name, sql string, prop
 	}
 	defer conn.Close()
 
-
-	// Build fully-qualified table name using connector's database
-	tableName := safeSQLName(name)
-	if c.configProp.Database != "" {
-		tableName = safeSQLName(c.configProp.Database) + "." + tableName
+	// Build fully-qualified table name: catalog.database.table
+	catalog := c.configProp.Catalog
+	if catalog == "" {
+		catalog = defaultCatalog
 	}
+	tableName := safeSQLName(catalog)
+	if c.configProp.Database != "" {
+		tableName += "." + safeSQLName(c.configProp.Database)
+	}
+	tableName += "." + safeSQLName(name)
 
 	strategy := props.IncrementalStrategy
 	if strategy == "" || strategy == drivers.IncrementalStrategyAppend {

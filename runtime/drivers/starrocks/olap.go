@@ -2,6 +2,7 @@ package starrocks
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -86,8 +87,22 @@ func (c *connection) Query(ctx context.Context, stmt *drivers.Statement) (*drive
 		return nil, err
 	}
 
+	cts, err := rows.ColumnTypes()
+	if err != nil {
+		rows.Close()
+		return nil, err
+	}
+
+	// Wrap rows with starrocksRows to handle proper type scanning
+	// This is necessary because the MySQL driver returns []byte for many types
+	wrappedRows := &starrocksRows{
+		Rows:     rows,
+		scanDest: prepareScanDest(schema),
+		colTypes: cts,
+	}
+
 	return &drivers.Result{
-		Rows:   rows,
+		Rows:   wrappedRows,
 		Schema: schema,
 	}, nil
 }
@@ -150,8 +165,11 @@ func (c *connection) databaseTypeToRuntimeType(dbType string) (*runtimev1.Type, 
 	}
 
 	switch dbType {
-	case "BOOLEAN", "BOOL", "TINYINT":
+	case "BOOLEAN", "BOOL":
 		return &runtimev1.Type{Code: runtimev1.Type_CODE_BOOL}, nil
+	case "TINYINT":
+		// TINYINT is -128 to 127, not a boolean (unlike MySQL convention where TINYINT(1) is bool)
+		return &runtimev1.Type{Code: runtimev1.Type_CODE_INT8}, nil
 	case "SMALLINT":
 		return &runtimev1.Type{Code: runtimev1.Type_CODE_INT16}, nil
 	case "INT", "INTEGER":
@@ -181,9 +199,129 @@ func (c *connection) databaseTypeToRuntimeType(dbType string) (*runtimev1.Type, 
 	case "STRUCT":
 		return &runtimev1.Type{Code: runtimev1.Type_CODE_STRUCT}, nil
 	case "BINARY", "VARBINARY", "BLOB":
-		// Note: StarRocks doesn't have BLOB type, but MySQL driver may report VARBINARY as BLOB
-		return &runtimev1.Type{Code: runtimev1.Type_CODE_BYTES}, nil
+		// Note: StarRocks BINARY/VARBINARY types should be treated as strings
+		// The MySQL driver returns []byte which gets base64-encoded if we use CODE_BYTES
+		// Using CODE_STRING ensures proper string conversion
+		return &runtimev1.Type{Code: runtimev1.Type_CODE_STRING}, nil
 	default:
 		return nil, errUnsupportedType
 	}
+}
+
+// starrocksRows wraps sqlx.Rows to provide MapScan method with proper type handling.
+// This is required because the MySQL driver returns []byte for many types when using generic scanning.
+type starrocksRows struct {
+	*sqlx.Rows
+	scanDest []any
+	colTypes []*sql.ColumnType
+}
+
+func (r *starrocksRows) MapScan(dest map[string]any) error {
+	err := r.Rows.Scan(r.scanDest...)
+	if err != nil {
+		return err
+	}
+	for i, ct := range r.colTypes {
+		fieldName := ct.Name()
+		valPtr := r.scanDest[i]
+		if valPtr == nil {
+			dest[fieldName] = nil
+			continue
+		}
+		switch valPtr := valPtr.(type) {
+		case *sql.NullBool:
+			if valPtr.Valid {
+				dest[fieldName] = valPtr.Bool
+			} else {
+				dest[fieldName] = nil
+			}
+		case *sql.NullInt16:
+			if valPtr.Valid {
+				// Check if this is TINYINT (INT8) and convert to int8
+				dbType := strings.ToUpper(r.colTypes[i].DatabaseTypeName())
+				if dbType == "TINYINT" {
+					dest[fieldName] = int8(valPtr.Int16)
+				} else {
+					dest[fieldName] = valPtr.Int16
+				}
+			} else {
+				dest[fieldName] = nil
+			}
+		case *sql.NullInt32:
+			if valPtr.Valid {
+				dest[fieldName] = valPtr.Int32
+			} else {
+				dest[fieldName] = nil
+			}
+		case *sql.NullInt64:
+			if valPtr.Valid {
+				dest[fieldName] = valPtr.Int64
+			} else {
+				dest[fieldName] = nil
+			}
+		case *sql.NullFloat64:
+			if valPtr.Valid {
+				dest[fieldName] = valPtr.Float64
+			} else {
+				dest[fieldName] = nil
+			}
+		case *sql.NullString:
+			if valPtr.Valid {
+				dest[fieldName] = valPtr.String
+			} else {
+				dest[fieldName] = nil
+			}
+		case *sql.NullTime:
+			if valPtr.Valid {
+				dest[fieldName] = valPtr.Time
+			} else {
+				dest[fieldName] = nil
+			}
+		default:
+			// For any other types, dereference the pointer
+			dest[fieldName] = *(valPtr.(*any))
+		}
+	}
+	return nil
+}
+
+// prepareScanDest creates scan destinations for each field based on its type.
+func prepareScanDest(schema *runtimev1.StructType) []any {
+	scanList := make([]any, len(schema.Fields))
+	for i, field := range schema.Fields {
+		var dest any
+		switch field.Type.Code {
+		case runtimev1.Type_CODE_BOOL:
+			dest = &sql.NullBool{}
+		case runtimev1.Type_CODE_INT8:
+			// Use NullInt16 because NullByte is uint8 (0-255), but TINYINT is -128 to 127
+			dest = &sql.NullInt16{}
+		case runtimev1.Type_CODE_INT16:
+			dest = &sql.NullInt16{}
+		case runtimev1.Type_CODE_INT32:
+			dest = &sql.NullInt32{}
+		case runtimev1.Type_CODE_INT64, runtimev1.Type_CODE_INT128:
+			dest = &sql.NullInt64{}
+		case runtimev1.Type_CODE_FLOAT32, runtimev1.Type_CODE_FLOAT64:
+			dest = &sql.NullFloat64{}
+		case runtimev1.Type_CODE_STRING:
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_DECIMAL:
+			// Decimal values are returned as strings by MySQL driver
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_DATE:
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_TIME:
+			dest = &sql.NullString{}
+		case runtimev1.Type_CODE_TIMESTAMP:
+			// MySQL driver returns time.Time when parseTime=true
+			dest = &sql.NullTime{}
+		case runtimev1.Type_CODE_JSON:
+			dest = &sql.NullString{}
+		default:
+			dest = new(any)
+		}
+		scanList[i] = dest
+	}
+	return scanList
 }

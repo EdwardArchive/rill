@@ -111,6 +111,15 @@ var spec = drivers.Spec{
 			Description: "Enable logging of all SQL queries",
 			Hint:        "Useful for debugging (logs all SQL statements)",
 		},
+		{
+			Key:         "mode",
+			Type:        drivers.StringPropertyType,
+			DisplayName: "Mode",
+			Required:    false,
+			Default:     "readonly",
+			Description: "Connection mode: 'readonly' for OLAP queries only, 'readwrite' to enable model creation",
+			Hint:        "Set to 'readwrite' to create tables/views in StarRocks",
+		},
 	},
 	ImplementsOLAP: true,
 }
@@ -140,6 +149,10 @@ type ConfigProperties struct {
 	SSL bool `mapstructure:"ssl"`
 	// LogQueries enables SQL query logging.
 	LogQueries bool `mapstructure:"log_queries"`
+	// Mode determines if StarRocks is read-only or read-write (for modeling).
+	// "readonly" (default): OLAP queries only, no model creation.
+	// "readwrite": Enable model creation (CREATE TABLE/VIEW).
+	Mode string `mapstructure:"mode"`
 }
 
 // Validate checks the configuration for errors.
@@ -315,15 +328,31 @@ func (c *connection) AsNotifier(properties map[string]any) (drivers.Notifier, er
 }
 
 // AsModelExecutor implements drivers.Handle.
-// StarRocks is a read-only OLAP connector, model execution is not supported.
+// Returns a model executor when mode is "readwrite", otherwise returns an error.
 func (c *connection) AsModelExecutor(instanceID string, opts *drivers.ModelExecutorOptions) (drivers.ModelExecutor, error) {
+	if opts.OutputHandle != c {
+		return nil, drivers.ErrNotImplemented
+	}
+	if c.configProp.Mode != "readwrite" {
+		return nil, fmt.Errorf("model execution is disabled. To enable modeling on this StarRocks database, set 'mode: readwrite' in your connector configuration. WARNING: This will allow Rill to create and overwrite tables in your database")
+	}
+	if opts.InputHandle == c {
+		return &selfToSelfExecutor{c}, nil
+	}
+	// Cross-connector: input is different StarRocks connector
+	if inputConn, ok := opts.InputHandle.(*connection); ok {
+		return &starrocksToSelfExecutor{inputConn: inputConn, outputConn: c}, nil
+	}
 	return nil, drivers.ErrNotImplemented
 }
 
 // AsModelManager implements drivers.Handle.
-// StarRocks is a read-only OLAP connector, model management is not supported.
+// Returns the connection as ModelManager when mode is "readwrite".
 func (c *connection) AsModelManager(instanceID string) (drivers.ModelManager, bool) {
-	return nil, false
+	if c.configProp.Mode != "readwrite" {
+		return nil, false
+	}
+	return c, true
 }
 
 // initDB initializes the database connection.
